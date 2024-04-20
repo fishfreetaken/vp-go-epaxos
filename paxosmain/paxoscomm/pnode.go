@@ -21,8 +21,17 @@ const (
 )
 
 func (m *Pnode) receive() {
+	///var cnt int
 	for v := range m.recv {
+
 		fromid := v.from
+		/*
+			cnt++
+			if cnt%50000 == 0 {
+				fmt.Printf("master:%d cnt:%d from:%d \n", m.id, cnt, fromid)
+			}
+		*/
+
 		var r *pmsg
 		switch v.msgtype {
 		case MSG_TYPE_PROPOSE: //回包
@@ -39,7 +48,7 @@ func (m *Pnode) receive() {
 		if r != nil {
 			r.from = m.id
 			//fmt.Printf("msg send loc:%d from:%d v:%d\n", m.id, r.from, v.from)
-			m.g.send(fromid, *r)
+			go m.g.send(fromid, *r)
 		}
 	}
 }
@@ -146,11 +155,12 @@ func (m *Pnode) accceptack(kc *pmsg) {
 
 	//我的提议或者别人的提议是否超过半数，别人超过认别人当老大，自己超过就认自己老大
 	masterVote := r.getmasteraccept(m.g.len())
-	if masterVote >= 0 && masterVote == m.id {
+	if masterVote >= 0 {
 		// i win
 		m.g.calcVoteResult(kc.seq, masterVote)
 		//fmt.Printf("i win masterVote:%d seq:%d id:%d get master from:%d \n", masterVote, r.seq, m.id, kc.from)
-	} else if len(r.acceptids) == m.g.len() && masterVote == -1 {
+	} else if len(r.acceptids) == m.g.len() {
+		//没有形成决议
 		m.g.calcVoteResult(kc.seq, -1)
 	}
 	//fmt.Printf("id:%d list :%+v\n", m.id, r.acceptids)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -17,6 +18,7 @@ type Group struct {
 	seq         int
 	recvseq     chan int
 	begin       time.Time
+	cntcc       int32
 
 	Totalseq int
 }
@@ -86,29 +88,32 @@ func (m *Group) Report(seq int) {
 		//fmt.Printf("msg:%+v\n", m.Index(key).getmsg(seq))
 	}
 
+	var printRc = func() {
+		for key, v := range rc {
+			fmt.Printf("vote:%d list:%+v \n", key, v)
+			//fmt.Printf("msg:%+v\n", m.Index(key).getmsg(seq))
+		}
+	}
+
 	tmplocalgp := -1
 	if v, ok := m.mpResult[seq]; ok {
 		tmplocalgp = v
 	}
-	if tmplocalgp == masterIdx {
-		if masterIdx == -1 {
-			m.nodecidenum++
-		} else {
-			m.decidenum++
-		}
-	} else {
+	if tmplocalgp == masterIdx && masterIdx != -1 {
+		m.decidenum++
+		return
+	} else if tmplocalgp != masterIdx {
 		m.invalid++
+		fmt.Printf("not equale seq:%d localresult:%d masteridx:%d\n", seq, tmplocalgp, masterIdx)
+	} else {
+		fmt.Printf("seq:%d not desicde \n", seq)
+		m.nodecidenum++
 	}
-
+	printRc()
+	fmt.Printf("\n")
 	return
 	//if masterIdx == -1 {
-	for key, v := range rc {
-		fmt.Printf("vote:%d list:%+v \n", key, v)
-		if key == -1 {
-			continue
-		}
-		//fmt.Printf("msg:%+v\n", m.Index(key).getmsg(seq))
-	}
+
 	for key, v := range pr {
 		fmt.Printf("propose vote:%d list:%+v \n", key, v)
 		if key == -1 {
@@ -138,39 +143,45 @@ func (m *Group) calcVoteResult(seq, masterid int) {
 		m.mpResult = make(map[int]int)
 	}
 
-	if _, ok := m.mpResult[seq]; ok {
+	if hasMasterid, ok := m.mpResult[seq]; ok {
+		if hasMasterid != masterid {
+			panic(fmt.Sprintf("seq:%d hasmaster:%d masterid:%d", seq, hasMasterid, masterid))
+		}
 		return
 	}
 	m.mpResult[seq] = masterid
+	atomic.AddInt32(&m.cntcc, 1)
 
 	//看所有的seq都已经计算过了
 	m.recvseq <- seq
 }
 
 func (m *Group) Wait(seq int) {
-	t := time.NewTicker(time.Second * 45)
-
+	t := time.NewTicker(time.Second * 30)
+	fmt.Printf("begin to wait seq:%d", seq)
 	for {
 		select {
 		case v := <-m.recvseq:
-			m.lk.Lock()
-			if v == seq || len(m.mpResult) == m.Totalseq {
+			cntvalue := atomic.LoadInt32(&m.cntcc)
+			if v == seq || cntvalue == int32(m.Totalseq) {
 				//检查是否完成
 				//fmt.Printf("seq over:%d\n", seq)
-				m.lk.Unlock()
 				return
 			}
-			m.lk.Unlock()
 		case <-t.C:
 			//时间过期了
 			t.Stop()
-			fmt.Printf("wait expire\n")
+			cntvalue := atomic.LoadInt32(&m.cntcc)
+			fmt.Printf("wait expire cntvalue:%d\n", cntvalue)
 			return
 		}
 	}
 }
 
 func (m *Group) Init(k int) {
+	if m.Totalseq == 0 {
+		panic("null total seq")
+	}
 	rand.New(rand.NewSource(time.Now().Unix()))
 	m.begin = time.Now()
 
@@ -182,6 +193,7 @@ func (m *Group) Init(k int) {
 			recv: make(chan pmsg, m.Totalseq),
 			g:    m,
 		}
+		//fmt.Printf("master i:%d m.Totalseq：%d recv:%d \n", i, m.Totalseq, cap(tmp.recv))
 		m.list = append(m.list, tmp)
 		go tmp.receive()
 	}

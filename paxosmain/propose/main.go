@@ -3,21 +3,40 @@ package main
 import (
 	"fmt"
 	"net/http"
-	_ "net/http/pprof"
+	"net/http/pprof"
+	"os"
 	"paxosmain/paxoscomm"
+	"strconv"
 )
+
+func SetupPProf() {
+	r := http.NewServeMux()
+	r.HandleFunc("/debug/pprof/", pprof.Index)
+	r.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	r.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+	if err := http.ListenAndServe(":9909", r); err != nil {
+		fmt.Printf("Err: http.ListenAndServe err; Info: err=%v\n", err)
+	}
+}
 
 func main() {
 	seqnum := 10000
+
+	if len(os.Args) > 1 && len(os.Args[1]) > 0 {
+		iseq, _ := strconv.ParseInt(os.Args[1], 10, 64)
+		seqnum = int(iseq)
+		fmt.Printf("input update seqnum:%d\n", seqnum)
+	}
+
 	var g = paxoscomm.Group{
 		Totalseq: seqnum,
 	}
-	g.Init(10)
-	go func() {
-		http.ListenAndServe("0.0.0.0:80", nil)
-	}()
+	g.Init(11)
 
-	fmt.Printf("go begin")
+	go SetupPProf()
 
 	for i := 0; i < seqnum; i++ {
 		go func(seq int) {
