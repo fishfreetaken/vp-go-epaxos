@@ -43,13 +43,8 @@ func main() {
 	var g = paxoscomm.Group{
 		Totalseq: seqnum,
 	}
-<<<<<<< HEAD:singlePaxos/propose/main.go
-	nodenum := 11
-	g.Init(nodenum)
-=======
 
 	g.Init(11)
->>>>>>> 37b24a5f943704501f4056a832b54f725be31fd5:paxosmain/propose/main.go
 
 	go SetupPProf()
 
