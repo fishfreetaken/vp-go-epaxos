@@ -25,15 +25,25 @@ func SetupPProf() {
 func main() {
 	seqnum := 10000
 
-	if len(os.Args) > 1 && len(os.Args[1]) > 0 {
-		iseq, _ := strconv.ParseInt(os.Args[1], 10, 64)
-		seqnum = int(iseq)
-		fmt.Printf("input update seqnum:%d\n", seqnum)
+	var iwateSec int
+
+	if len(os.Args) > 1 {
+		if len(os.Args[1]) > 0 {
+			iseq, _ := strconv.ParseInt(os.Args[1], 10, 64)
+			seqnum = int(iseq)
+			fmt.Printf("input update seqnum:%d\n", seqnum)
+		}
+		if len(os.Args) > 2 {
+			iwaitenume, _ := strconv.ParseInt(os.Args[2], 10, 64)
+			iwateSec = int(iwaitenume)
+			fmt.Printf("waite waite:%d\n", iwateSec)
+		}
 	}
 
 	var g = paxoscomm.Group{
 		Totalseq: seqnum,
 	}
+
 	g.Init(11)
 
 	go SetupPProf()
@@ -48,7 +58,7 @@ func main() {
 		g.RefreshSeq(i + 1)
 	}
 
-	g.Wait(-1)
+	g.Wait(-1, iwateSec)
 	//time.Sleep(time.Second * 3)
 	for i := 0; i < seqnum; i++ {
 		g.Report(i)
