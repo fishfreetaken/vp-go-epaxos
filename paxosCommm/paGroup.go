@@ -9,7 +9,6 @@ import (
 type PaGroup struct {
 	list map[int]PaNode
 
-	curseq   int
 	recvseq  chan VoteInfo
 	mpResult map[int]int //seq -> nodeid
 	begin    time.Time
@@ -21,20 +20,22 @@ type PaGroup struct {
 	invalid     int
 }
 
-func (m *PaGroup) sendto(idx int, st PaMsg) {
-	m.list[idx].AddToMyRecv(st)
+func (m *PaGroup) Sendto(idx int, st PaCommnMsg) {
+	m.list[idx].Recv(st)
 }
 
+/*
 func (m *PaGroup) len() int {
 	return len(m.list)
 }
+*/
 
 func (m *PaGroup) Index(idx int) PaNode {
 	return m.list[idx]
 }
 
-func (m *PaGroup) Broadcast(st PaMsg) {
-	m.Broadcastexcept(st, -1)
+func (m *PaGroup) Broadcast(st *PaCommnMsg) {
+	m.Broadcastexcept(*st, -1)
 }
 
 func (m *PaGroup) randsleep() {
@@ -42,20 +43,20 @@ func (m *PaGroup) randsleep() {
 	time.Sleep(time.Duration(t) * time.Millisecond)
 }
 
-func (m *PaGroup) Broadcastexcept(st PaMsg, index int) {
+func (m *PaGroup) Broadcastexcept(st PaCommnMsg, index int) {
 	for i := range m.list {
 		if i == index {
 			continue
 		}
-		m.sendto(i, st)
-		m.randsleep()
+		m.Sendto(i, st)
+		//m.randsleep() //没有必要
 	}
 }
 
 func (m *PaGroup) Report(seq int) {
 	var rc = make(map[int][]int)
 	for _, v := range m.list {
-		rc[v.Getmsg(seq).GetVoteInfo().acceptvote] = append(rc[v.Getmsg(seq).GetVoteInfo().acceptvote], v.GetId())
+		rc[v.GetSeqMsg(seq).GetVoteInfo().AcceptVote] = append(rc[v.GetSeqMsg(seq).GetVoteInfo().AcceptVote], v.GetId())
 	}
 
 	masterIdx := -1
@@ -67,13 +68,13 @@ func (m *PaGroup) Report(seq int) {
 			masterIdx = key
 		}
 		//fmt.Printf("vote:%d list:%+v \n", key, v)
-		//fmt.Printf("msg:%+v\n", m.Index(key).getmsg(seq))
+		//fmt.Printf("msg:%+v\n", m.Index(key).GetSeqMsg(seq))
 	}
 
 	var printRc = func() {
 		for key, v := range rc {
 			fmt.Printf("vote:%d list:%+v \n", key, v)
-			//fmt.Printf("msg:%+v\n", m.Index(key).getmsg(seq))
+			//fmt.Printf("msg:%+v\n", m.Index(key).GetSeqMsg(seq))
 		}
 	}
 
@@ -102,8 +103,8 @@ func (m *PaGroup) GetLastCalc() {
 func (m *PaGroup) InformVoteResult(seq, masterid int) {
 	//看所有的seq都已经计算过了
 	m.recvseq <- VoteInfo{
-		seq:        seq,
-		acceptvote: masterid,
+		Seq:        seq,
+		Acceptvote: masterid,
 	}
 }
 
@@ -118,13 +119,13 @@ func (m *PaGroup) Wait(seq int) {
 			}
 
 			if hasMasterid, ok := m.mpResult[seq]; ok {
-				if hasMasterid != v.acceptvote {
-					panic(fmt.Sprintf("seq:%d hasmaster:%d masterid:%d", seq, hasMasterid, v.acceptvote))
+				if hasMasterid != v.Acceptvote {
+					panic(fmt.Sprintf("seq:%d hasmaster:%d masterid:%d", seq, hasMasterid, v.Acceptvote))
 				}
 				return
 			}
-			m.mpResult[seq] = v.acceptvote
-			if v.seq == seq || len(m.mpResult) == m.ttSeq {
+			m.mpResult[seq] = v.Acceptvote
+			if v.Seq == seq || len(m.mpResult) == m.ttSeq {
 				//检查是否完成
 				//fmt.Printf("seq over:%d\n", seq)
 				return
@@ -161,4 +162,8 @@ func (m *PaGroup) AddNewMember(t PaNode) {
 
 func (m *PaGroup) RandNodeIndex() int {
 	return int(rand.Int31()) % len(m.list)
+}
+
+func (m *PaGroup) GetNumber() int {
+	return len(m.list)
 }
