@@ -60,31 +60,24 @@ func (m *PaGroup) Report(seq int64) {
 		rc[v.GetSeqMsg(seq).Vt.AcceptVote] = append(rc[v.GetSeqMsg(seq).Vt.AcceptVote], v.GetId())
 	}
 
-	/*
-		if len(rc) > 1 {
-			panic(fmt.Sprintf("Report daiy check failed %+v", rc))
-		}
-	*/
-
 	masterIdx := -1
 	for key, v := range rc {
+		if key == 0 {
+			panic(fmt.Sprintf("invalid key seq:%d", seq))
+		}
 		if len(v) >= (len(m.list)>>1 + 1) {
 			if masterIdx != -1 {
 				panic("invalid master index")
 			}
 			masterIdx = key
 		}
-		//fmt.Printf("vote:%d list:%+v \n", key, v)
-		//fmt.Printf("msg:%+v\n", m.Index(key).GetSeqMsg(seq))
 	}
 
 	var printRc = func() {
 		for key, v := range rc {
 			fmt.Printf("vote:%d list:%+v \n", key, v)
 			fmt.Printf("key:%d msg:%+v\n", key, m.list[key].GetSeqMsg(seq))
-			//fmt.Printf("msg:%+v\n", m.Index(key).GetSeqMsg(seq))
 		}
-
 	}
 
 	tmplocalgp := -1
@@ -106,7 +99,12 @@ func (m *PaGroup) Report(seq int64) {
 }
 
 func (m *PaGroup) GetLastCalc(totalseq int) {
-	fmt.Printf("GetLastCalc total:%d:%d decide %d:%f nodecide:%d:%f invalid:%d 时间消耗：%+v\n", totalseq, m.decidenum+m.nodecidenum, m.decidenum, GetPercent(m.decidenum, totalseq), m.nodecidenum, GetPercent(m.nodecidenum, totalseq), m.invalid, time.Since(m.begin))
+	var ttcnt int
+	var proposesum int
+	for _, v := range m.list {
+		fmt.Printf("%s\n", v.CalcLastSuccRate(&ttcnt, &proposesum))
+	}
+	fmt.Printf("GetLastCalc total:%d:%d:%d sumproposenum:%d:%f decide %d:%f nodecide:%d:%f invalid:%d 时间消耗：%+v\n", totalseq, m.decidenum+m.nodecidenum, ttcnt, proposesum, GetPercent(totalseq, proposesum), m.decidenum, GetPercent(m.decidenum, totalseq), m.nodecidenum, GetPercent(m.nodecidenum, totalseq), m.invalid, time.Since(m.begin))
 }
 
 func (m *PaGroup) InformVoteResult(t VoteInfo) {
@@ -138,7 +136,7 @@ func (m *PaGroup) Wait(seqNum int64) {
 		case <-t.C:
 			//时间过期了
 			t.Stop()
-			fmt.Printf("wait expire cntvalue:%d\n", 0)
+			fmt.Printf("wait expire cntvalue:%d seqnum:%d\n", len(m.mpResult), seqNum)
 			return
 		}
 	}
@@ -153,7 +151,8 @@ func (m *PaGroup) Init(membernum int) {
 			priority: i,
 			//recv: make(chan PaCommnMsg, 1000),
 			//dict: make(map[int64]*PaCommnMsg),
-			g: m,
+			mpLocPropose: make(map[int64]time.Time),
+			g:            m,
 		})
 		m.list[i].SetVecLkNums()
 	}

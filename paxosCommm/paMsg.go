@@ -122,8 +122,6 @@ type PaCommnMsg struct {
 
 	Flowtype int32 //最高位置进行标记，节省内存
 
-	InForm chan int //通知client端的chan消息
-
 	ProposeList []VoteInfo
 	AcceptList  []VoteInfo
 
@@ -146,17 +144,6 @@ func (m *PaCommnMsg) GetSeqID() int64 {
 func (m *PaCommnMsg) SetFrom(id int, flowtype int32) {
 	m.Vt.SetFrom(id)
 	m.Flowtype = flowtype
-}
-
-func (m *PaCommnMsg) Inform(voteid int) {
-	select {
-	case <-m.InForm:
-		return
-	default:
-		break
-	}
-	m.InForm <- voteid
-
 }
 
 //接受一个提议
@@ -232,7 +219,7 @@ func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept b
 		}
 	}
 	//是否可以进入accept状，我自己有可能投票给别人
-	if cnt >= (membersNum >> 1) {
+	if cnt >= (membersNum>>1 + 1) {
 		//这里采用的是自己先accept再，让其他人继续accept ，默认是自己已经accept
 		accept = true
 
@@ -240,7 +227,8 @@ func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept b
 		m.Vt.State = PAXOS_MSG_HAS_ACCEPTED
 		m.Vt.AcceptVote = nodeid
 
-		m.AddAccepList(t.Vt)
+		//先接受自己
+		m.AddAccepList(m.Vt)
 		m.Flowtype = PAXOS_MSG_ACCEPT
 	}
 	return
@@ -328,7 +316,7 @@ func (m *PaCommnMsg) AcceptAck(t *PaCommnMsg, membernum int) (accept bool, accep
 	}
 	if ((membernum - cnt) + maxvale) < (membernum>>1 + 1) {
 		//谁都胜利不出
-		fmt.Printf("impossiable accept vote success maxvale:%d membernum:%d cnt:%d  m:%+v t:%+v", maxvale, membernum, cnt, m, t)
+		fmt.Printf("impossiable accept vote success maxvale:%d membernum:%d cnt:%d  m:%+v t:%+v\n", maxvale, membernum, cnt, m, t)
 	}
 	//要检查是不是肯定不能成功了，检查所有的票状态
 	//感知到如果是空洞的话，这里提交的就失败了
