@@ -13,3 +13,11 @@ func randsleep() {
 	t := rand.Intn(100)
 	time.Sleep(time.Duration(t) * time.Millisecond)
 }
+func GetPosCount(k int) int {
+	cnt := 1
+	for k > 0 {
+		k = k / 10
+		cnt *= 10
+	}
+	return cnt
+}

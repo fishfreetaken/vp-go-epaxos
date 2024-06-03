@@ -2,6 +2,7 @@ package paxoscommm
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,11 +24,15 @@ type PaNode struct {
 
 	dict sync.Map //[int64]*PaCommnMsg
 
-	//这个只是用来进行保存本地提交的seq
-	mpLocPropose map[int64]time.Time
+	//这个只是用来进行保存本地提交的seq, 这个用instacneid来触发处理
+	mpLocPropose map[int64]*AckState
 	lk           sync.Mutex
 
 	veclk []sync.Mutex
+
+	//每一个提交都建立一个唯一的事件id，这个id还是需要放到
+	instanceid int64
+	seqmap     map[int64]int64 //我要知道哪些是我自己的提出来的
 
 	//当前的
 	curseq int64
@@ -35,22 +40,20 @@ type PaNode struct {
 }
 
 func (m *PaNode) SetVecLkNums() {
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 300; i++ {
 		m.veclk = append(m.veclk, sync.Mutex{})
 	}
 }
 
-func (m *PaNode) NewProPoseMsg(proposeid int) *PaCommnMsg {
-	var res *PaCommnMsg
+func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 	//获取当前进度的seqid
 	var iCurSeq int64
+	var proposeid int32
+	iCurInstanceId := atomic.AddInt64(&m.instanceid, 1)
 	for {
+		proposeid = m.BuildProposeId()
+		//尽量减少中间等待的时间
 		iCurSeq = atomic.AddInt64(&m.curseq, 1)
-		if _, ok := m.dict.Load(iCurSeq); ok {
-			//panic(fmt.Sprintf("cur id:%d icurseq:%d inavlid msg:%+v", m.id, iCurSeq, v))
-			//fmt.Printf("cur id:%d icurseq:%d inavlid msg:%+v\n", m.id, iCurSeq, v)
-			continue
-		}
 		var cm = PaCommnMsg{
 			Vt: VoteInfo{
 				ProposeId:   proposeid,
@@ -58,25 +61,36 @@ func (m *PaNode) NewProPoseMsg(proposeid int) *PaCommnMsg {
 				Seq:         iCurSeq,
 				FromId:      m.id,
 			},
+			Body:       req,
+			InstanceId: iCurInstanceId,
 		}
 		_, load := m.dict.LoadOrStore(iCurSeq, &cm)
 		if !load {
-			res = &cm
 			//fmt.Printf("nodeid:%d begin goto seq:%d to proposeid:%d cm:%+v cm:%p\n", m.id, iCurSeq, proposeid, cm, &cm)
-			break
+			//这里中间可能会发生改变，这个seq值被其他人占用
+			if atomic.LoadInt32(&(cm.Vt.ProposeId)) <= proposeid {
+				//这个值已经被别的抢占小了，重新发起
+				break
+			}
 		}
-
 		//这个值已经存在了，重新再找一个点
 		//fmt.Printf("nodeid:%d has load this seq:%d newCurSeq:%d value:%+v\n", m.id, iCurSeq, atomic.LoadInt64(&m.curseq), value)
 	}
-	m.g.Broadcast(&PaCommnMsg{
+	res := &PaCommnMsg{
 		Vt: VoteInfo{
 			ProposeId:   proposeid,
 			ProposeVote: m.id,
 			Seq:         iCurSeq,
 			FromId:      m.id,
 		},
-	})
+		InstanceId: iCurInstanceId,
+		Body:       req,
+	}
+	//本地先注册
+	//fmt.Printf("nodeid:%d instanceid:%d seqid:%d\n", m.id, iCurInstanceId, iCurSeq)
+	m.RegisterSeq(res)
+	//广播给其他人
+	m.g.Broadcast(res)
 	return res
 }
 
@@ -96,56 +110,128 @@ func (m *PaNode) NewCommitMsg(t *PaCommnMsg) PaCommnMsg {
 	return *t
 }
 
-func (m *PaNode) BuildProposeId() int {
+type AckState struct {
+	t     time.Time
+	seq   int64
+	iCode int //返回的结果 0
+}
 
-	//return rand.Intn(100000)
+func (m *PaNode) BuildProposeId() int32 {
+	//这里是保证唯一的，而且如果有竞争的话，相对来说值越大的概率更高
+	return int32(rand.Intn(100000)*GetPosCount(m.g.GetNumber()) + m.id)
 	//随机+priorityid
 	offset := 10000
 	newLocInc := atomic.AddInt32(&glocInc, 1)
-	return m.priority*offset + int(newLocInc) //rand.Intn(offset)
+	return int32(m.priority*offset + int(newLocInc)) //rand.Intn(offset)
 }
 
-func (m *PaNode) RegisterSeq(iseq int64) {
+func (m *PaNode) RegisterSeq(msg *PaCommnMsg) {
 	m.lk.Lock()
 	defer m.lk.Unlock()
-	m.mpLocPropose[iseq] = time.Now()
+	m.seqmap[msg.GetSeqID()] = msg.InstanceId
+	if v, ok := m.mpLocPropose[msg.InstanceId]; ok {
+		panic(fmt.Sprintf("has instanid:%d v:%+v msg:%+v", v, msg))
+	}
+	m.mpLocPropose[msg.InstanceId] = &AckState{
+		t:   time.Now(),
+		seq: msg.GetSeqID(),
+	}
+}
+
+const (
+	PANODE_RESULT_NOP           = iota //失效了
+	PANODE_RESULT_SUC           = 1    //成功
+	PANODE_RESULT_BIG_PROPOSEID = 2    //更大的proposeid
+	PANODE_RESULT_OTHER_ACCEPT  = 3    //其他人已经accept过了
+	PANODE_RESULT_IMPOSSIBLE    = 4    //选票被瓜分，不可能成功了
+)
+
+func (m *PaNode) ResultReport(r *PaCommnMsg, result int) int32 {
+	m.lk.Lock()
+	defer m.lk.Unlock()
+	iCurInstance, ok := m.seqmap[r.Vt.Seq]
+	if !ok {
+		return 0
+	}
+	if iCurInstance != r.InstanceId {
+		panic(fmt.Sprintf("r:%+v icur:%d", r, iCurInstance))
+	}
+	value, ok := m.mpLocPropose[r.InstanceId]
+	if !ok {
+		//不存在
+		return 0
+	}
+	if value.iCode != 0 {
+		return 0
+	}
+	value.iCode = result
+	v, ok := m.dict.Load(value.seq)
+	if !ok {
+		panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, r.InstanceId, v.(*PaCommnMsg)))
+	}
+
+	if result != PANODE_RESULT_SUC {
+		if v.(*PaCommnMsg).Vt.AcceptVote == m.id {
+			fmt.Printf("ResultReport node:%d instacnid:%d result:%d value:%+v invalid msg:%+v\n", m.id, r.InstanceId, result, value, v.(*PaCommnMsg))
+			return -1
+			//panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, instanceid, result, value, v.(*PaCommnMsg)))
+		}
+	} else {
+		if v.(*PaCommnMsg).Vt.AcceptVote != m.id {
+			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, r.InstanceId, v.(*PaCommnMsg)))
+		}
+	}
+	return 0
 }
 
 func (m *PaNode) CalcLastSuccRate(cnt, sumcnt *int) string {
-	m.lk.Lock()
-	m.lk.Unlock()
-
 	var suncnt int
-	for seqid := range m.mpLocPropose {
+	var code1 int
+	var code2 int
+	var code3 int
+	var code4 int
+	for seqid, vt := range m.mpLocPropose {
 		v, ok := m.dict.Load(seqid)
 		if !ok {
 			continue
 		}
 		t := v.(*PaCommnMsg)
 		if t.Vt.IsAccept() && m.g.mpResult[t.Vt.Seq] == m.id {
+			if vt.iCode != PANODE_RESULT_SUC {
+				//panic(fmt.Sprintf("nodid:%d seq:%d code:%d", m.id, t.Vt.Seq, vt.iCode))
+				code4++
+			}
 			suncnt++
+		}
+		if vt.iCode == PANODE_RESULT_BIG_PROPOSEID {
+			code1++
+		} else if vt.iCode == PANODE_RESULT_OTHER_ACCEPT {
+			code2++
+		} else if vt.iCode == PANODE_RESULT_IMPOSSIBLE {
+			code3++
 		}
 	}
 	*cnt += suncnt
 	*sumcnt += len(m.mpLocPropose)
 
-	return fmt.Sprintf("CalcLastSuccRate[nodeid:%d][succnt:%d][totalcnt:%d][sucrate:%f]", m.id, suncnt, len(m.mpLocPropose), GetPercent(suncnt, len(m.mpLocPropose)))
+	return fmt.Sprintf("CalcLastSuccRate[nodeid:%d][succnt:%d:%d][totalcnt:%d][sucrate:%f][Bigpropose:%f][otheraccept:%f][impossilbe:%f]", m.id, suncnt, code4, len(m.mpLocPropose),
+		GetPercent(suncnt, len(m.mpLocPropose)), GetPercent(code1, len(m.mpLocPropose)), GetPercent(code2, len(m.mpLocPropose)), GetPercent(code3, len(m.mpLocPropose)))
 }
 
 //允许自定义控制proposeid
 func (m *PaNode) BeginCommit(req *ClientReq, wg *sync.WaitGroup) int64 {
 	//有自己构造proposeid的能力
-	proposeid := m.BuildProposeId()
-
+	wg.Add(1)
 	//根据seqid 构建消息
-	msg := m.NewProPoseMsg(proposeid)
+	msg := m.NewProPoseMsg(req)
+	//msg.Body = req
 	//还是原来的值，这里异步已经接受了其他人的值，这里再发起的时候就已经变了值的，所以这里不能用原来的指针，需要重新创建一个新的值，与原来的进行剥离
 	//wg.Done()
 	//给一个事件的注册中心来注册，等待响应结果，要么等待超时
 	wg.Done()
 	//早早的退出，统一收归进行消息处理,快速进行下一次的提问
 	//设置超时时间
-	m.RegisterSeq(msg.GetSeqID())
+
 	return msg.Vt.Seq
 }
 
@@ -154,9 +240,9 @@ func (m *PaNode) Step(t *PaCommnMsg) {
 	//每次要更新最大的seq值
 	for {
 		tmpseq := atomic.LoadInt64(&m.curseq)
-		if tmpseq < int64(t.GetSeqID()) {
+		if tmpseq < t.GetSeqID() {
 			//更新最大的seq
-			if atomic.CompareAndSwapInt64(&m.curseq, tmpseq, int64(t.GetSeqID())) {
+			if atomic.CompareAndSwapInt64(&m.curseq, tmpseq, t.GetSeqID()) {
 				break
 			}
 		} else {
@@ -208,7 +294,16 @@ func (m *PaNode) Accept(t *PaCommnMsg, r *PaCommnMsg) {
 		panic(fmt.Sprintf("id:%d tmsg:%+v", m.id, t))
 	}
 	FromId := t.Vt.FromId
-	r.Accept(t)
+	bSuc := r.Accept(t)
+
+	if bSuc && r.IsAccept() && r.Vt.AcceptVote != m.id {
+		//fmt.Printf("invalid id:%d t:%+v r:%+v", m.id, t, r)
+		//自己接受了，但是不是自己的值，这里其实已经失败了
+		tres := m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
+		if tres != 0 {
+			panic(fmt.Sprintf("invalid id:%d t:%+v r:%+v", m.id, t, r))
+		}
+	}
 
 	t.SetFrom(m.id, PAXOS_MSG_ACCEPT_ACK)
 
@@ -231,7 +326,7 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 		t.Vt.UpdateProposeid(&r.Vt)
 
 		if t.Vt.AcceptVote == m.id {
-			//我自己都没有accept，远处传来一个accept，肯定失败的
+			//我自己都没有accept，远处传来一个accept，肯定异常的
 			panic(fmt.Sprintf("seq:%d self:%d", t.Vt.Seq, m.id))
 		}
 
@@ -249,18 +344,32 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 			//fmt.Printf("Async go help accept loc:%d seq:%d t:%+v r:%+v\n", m.id, t.Vt.Seq, t, r)
 			go m.g.Broadcastexcept(*t, m.id)
 		}
+
+		m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
+		//newres := m.NewProPoseMsg(r.Body.(*ClientReq))
+		//fmt.Printf("ProposeAck failed need to get new propose :%+v\n", newres)
+		//到这里自己的就需要主动放弃，寻求新的提议了
 		//}
 		//这里还不能决定到底有没有成功，只是当此的提交已经失败了
 		return
 	}
 
 	//正常的提交流程
-	bAccept := r.ProposeAck(t, m.g.GetNumber(), m.id)
+	bAccept, bretry := r.ProposeAck(t, m.g.GetNumber(), m.id)
 	//如果进入到下一个阶段，需要发起broadcast
 	if bAccept {
 		//这里只能是接收自己
 		//接上accept的逻辑，挡住后边的请求，自己先accept
-		go m.g.Broadcastexcept(*r, m.id)
+		go m.g.Broadcastexcept(PaCommnMsg{
+			Vt:         r.Vt,
+			Flowtype:   PAXOS_MSG_ACCEPT,
+			InstanceId: r.InstanceId,
+			Body:       r.Body,
+		}, m.id)
+	} else if bretry {
+		//newres := m.NewProPoseMsg(r.Body.(*ClientReq))
+		//fmt.Printf("ProposeAck ProposeAck failed need to get new propose :%+v\n", newres)
+		m.ResultReport(r, PANODE_RESULT_BIG_PROPOSEID)
 	}
 }
 
@@ -269,7 +378,13 @@ func (m *PaNode) AcceptAck(t *PaCommnMsg, r *PaCommnMsg) {
 	bAccept, acceptVoted := r.AcceptAck(t, m.g.GetNumber()) // 返回是否落盘
 	//判断是否能进入到下一个阶段
 	if bAccept {
-		//fmt.Printf("commit done id:%d seq:%d acceptVoted:%d vt:%+v  r:%+v \n", m.id, t.Vt.Seq, acceptVoted, t.Vt, r.Vt)
+		if acceptVoted != m.id {
+			//fmt.Printf("commit done id:%d seq:%d acceptVoted:%d vt:%+v  r:%+v \n", m.id, t.Vt.Seq, acceptVoted, t.Vt, r.Vt)
+		} else {
+			//只通知自己成功了
+			m.ResultReport(r, PANODE_RESULT_SUC)
+		}
+
 		//这里有并发的问题，并不知道是否已经close，超时也是有可能会在if判断之后，close的
 		//todo commit 提交所有人的决议
 		//m.g.InformVoteResult(t.Vt.Seq, acceptVoted, m.id)

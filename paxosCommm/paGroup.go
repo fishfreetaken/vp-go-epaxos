@@ -151,7 +151,8 @@ func (m *PaGroup) Init(membernum int) {
 			priority: i,
 			//recv: make(chan PaCommnMsg, 1000),
 			//dict: make(map[int64]*PaCommnMsg),
-			mpLocPropose: make(map[int64]time.Time),
+			mpLocPropose: make(map[int64]*AckState),
+			seqmap:       make(map[int64]int64),
 			g:            m,
 		})
 		m.list[i].SetVecLkNums()

@@ -6,10 +6,11 @@ const (
 	PAXOS_MSG_BEGIN_PROPOSE = iota //正在发起propose的流程中
 	PAXOS_MSG_HAS_ACCEPTED         //已经接受了，这里是确定提议
 	PAXOS_MSG_HAS_COMMITED         //已经提交，有一些节点可能被其他的accept，所以需要commit阶段进行提交
+	PAXOS_MSG_HAS_FAILED           //这次决议已经失败，没有谁获得了成功过
 )
 
 type VoteInfo struct {
-	ProposeId   int
+	ProposeId   int32
 	Seq         int64
 	ProposeVote int //提议阶段的选择
 	AcceptVote  int //接受阶段的选择
@@ -19,7 +20,7 @@ type VoteInfo struct {
 }
 
 func (m *VoteInfo) UpdateProposeid(t *VoteInfo) {
-	if t.ProposeId > m.ProposeId {
+	if t.ProposeId >= m.ProposeId {
 		m.ProposeId = t.ProposeId
 		m.ProposeVote = t.ProposeVote
 	}
@@ -41,7 +42,8 @@ func (m *VoteInfo) SetPropose(t *VoteInfo) bool {
 	if t.IsAccept() {
 		panic(fmt.Sprintf("invalid type m:%+v t:%+v", m, t))
 	}
-	if m.IsAccept() || t.ProposeId < m.ProposeId {
+
+	if m.IsAccept() || t.ProposeId <= m.ProposeId {
 		t.UpdateProposeid(m)
 		t.AcceptVote = m.AcceptVote
 		t.State = m.State
@@ -125,6 +127,8 @@ type PaCommnMsg struct {
 	ProposeList []VoteInfo
 	AcceptList  []VoteInfo
 
+	InstanceId int64
+
 	Body interface{} //可以是任何种类的数据，
 }
 
@@ -152,7 +156,7 @@ func (m *PaCommnMsg) Propose(t *PaCommnMsg) {
 	m.Vt.SetPropose(&t.Vt)
 }
 
-func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept bool) {
+func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, retry bool) {
 
 	if m.Vt.IsAccept() {
 		//我已经accept了，没有意义接受这个阶段
@@ -182,10 +186,13 @@ func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept b
 		//m.Vt.ProposeId = t.Vt.ProposeId
 		//fmt.Printf("SetPropose before nodeid:%d :%+v %+v", nodeid, t, m)
 		m.Vt.SetPropose(&t.Vt)
+		retry = true
+		//这里也是要触发一个新的提交流程
 		//fmt.Printf(" localnodid:%d update t:%+v m:%+v\n", nodeid, t, m)
 		return
 	} else if t.Vt.ProposeVote != m.Vt.ProposeVote {
 		//这里要保证ProposeId唯一性
+		// 如果proposeid相同，vote竟然不同，太不可思议了
 		panic(fmt.Sprintf("localnodie:%d t:%+v  m:%+v\n", nodeid, t, m))
 	}
 
@@ -314,9 +321,10 @@ func (m *PaCommnMsg) AcceptAck(t *PaCommnMsg, membernum int) (accept bool, accep
 			maxvale = votenum
 		}
 	}
-	if ((membernum - cnt) + maxvale) < (membernum>>1 + 1) {
+	if (membernum - cnt + maxvale) < (membernum>>1 + 1) {
 		//谁都胜利不出
 		fmt.Printf("impossiable accept vote success maxvale:%d membernum:%d cnt:%d  m:%+v t:%+v\n", maxvale, membernum, cnt, m, t)
+		m.Vt.State = PAXOS_MSG_HAS_FAILED
 	}
 	//要检查是不是肯定不能成功了，检查所有的票状态
 	//感知到如果是空洞的话，这里提交的就失败了
