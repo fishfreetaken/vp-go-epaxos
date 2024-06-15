@@ -19,11 +19,27 @@ type VoteInfo struct {
 	State       int32
 }
 
-func (m *VoteInfo) UpdateProposeid(t *VoteInfo) {
-	if t.ProposeId >= m.ProposeId {
+func (m *VoteInfo) UpdateProposeid(t *VoteInfo) bool {
+	if t.ProposeId > m.ProposeId {
 		m.ProposeId = t.ProposeId
 		m.ProposeVote = t.ProposeVote
+		return true
+	} else if t.ProposeId == m.ProposeId && m.ProposeVote != t.ProposeVote {
+		panic(fmt.Sprintf("t:%+v m:%+v invalid not equal", m, t))
 	}
+	return false
+}
+
+func (m *VoteInfo) IsFailed() bool {
+	return m.State == PAXOS_MSG_HAS_FAILED
+}
+
+func (m *VoteInfo) SetFailed() {
+	if m.State == PAXOS_MSG_HAS_COMMITED {
+		//不可能已经提交的话，还要设置failed
+		panic(fmt.Sprintf("[ERROR]impossible set failed :%+v", m))
+	}
+	m.State = PAXOS_MSG_HAS_FAILED
 }
 
 func (m *VoteInfo) IsAccept() bool {
@@ -46,6 +62,7 @@ func (m *VoteInfo) SetPropose(t *VoteInfo) bool {
 	if m.IsAccept() || t.ProposeId <= m.ProposeId {
 		t.UpdateProposeid(m)
 		t.AcceptVote = m.AcceptVote
+		t.CommitVote = m.CommitVote
 		t.State = m.State
 		return false
 	}
@@ -55,27 +72,37 @@ func (m *VoteInfo) SetPropose(t *VoteInfo) bool {
 	return true
 }
 
-func (m *VoteInfo) ResetState() {
-	m.State = PAXOS_MSG_BEGIN_PROPOSE
-	m.AcceptVote = -1
-}
-
-func (m *VoteInfo) SetAccept(t *VoteInfo) (suc bool) {
+func (m *VoteInfo) SetAccept(t *VoteInfo, bForce bool) (suc bool) {
 	if !t.IsAccept() {
 		panic(fmt.Sprintf("no valid t local proposeid:%d t:%+v\n", m.ProposeId, t))
 	}
 
-	defer func() {
-		t.UpdateProposeid(m)
-	}()
-
-	m.UpdateProposeid(t)
-
 	/*
-		if t.ProposeId == m.ProposeId && t.ProposeVote != m.ProposeVote {
-			panic(fmt.Sprintf("uniq proposeid vote diff t:%+v m:%+v\n", t, m))
-		}
+		//这里其实没有必要再进行更新proposeid了
+		defer func() {
+			t.UpdateProposeid(m)
+		}()
 	*/
+
+	if t.ProposeId == m.ProposeId && t.ProposeVote != m.ProposeVote {
+		panic(fmt.Sprintf("uniq proposeid vote diff t:%+v m:%+v\n", t, m))
+	}
+
+	if t.IsCommit() {
+		if m.IsCommit() {
+			if t.CommitVote != m.CommitVote {
+				panic(fmt.Sprintf("node m:%+v t:%+v\n", m, t))
+			}
+		} else {
+			m.SetCommit(t)
+			suc = true
+		}
+		return
+	}
+
+	if bForce && m.IsAccept() {
+		panic(fmt.Sprintf("invalid v:%+v t:%+v", m, t))
+	}
 
 	if m.IsAccept() {
 		//有可能已经commit,所以要赋值给state
@@ -86,27 +113,63 @@ func (m *VoteInfo) SetAccept(t *VoteInfo) (suc bool) {
 	}
 
 	//不接受低的proposid的accept
-	if m.ProposeId > t.ProposeId {
+	if !bForce && m.ProposeId > t.ProposeId {
 		//t的状态需要重置
-		t.ResetState()
+		t.UpdateProposeid(m)
+		t.State = PAXOS_MSG_BEGIN_PROPOSE
+		t.AcceptVote = -1
 		return
 	}
+
+	//accept我不需要更新这个proposeid的值了
+	//m.UpdateProposeid(t)
 	suc = true
 	//真正的accept
 	m.AcceptVote = t.AcceptVote
 	m.State = PAXOS_MSG_HAS_ACCEPTED
-
 	return
 }
 
-func (m *VoteInfo) SetCommit(commitVote int) {
+func (m *VoteInfo) SetSelfareCommit() {
+	if m.IsCommit() || !m.IsAccept() {
+		//不允许修改，自己没有提交，没有commit就不算
+		panic(fmt.Sprintf("not count commit %+v", m))
+	}
+
+	//commite是最终决定的值
+	m.CommitVote = m.AcceptVote
+	m.State = PAXOS_MSG_HAS_COMMITED
+}
+
+func (m *VoteInfo) CheckCommit(t *VoteInfo) bool {
+	if m.State == t.State && m.State == PAXOS_MSG_HAS_COMMITED {
+		if m.CommitVote != t.CommitVote {
+			return false
+			//panic(fmt.Sprintf("m:%+v  t:%+v\n", m, t))
+		}
+	}
+	return true
+}
+
+func (m *VoteInfo) SetCommit(t *VoteInfo) bool {
+	if !t.IsCommit() {
+		panic(fmt.Sprintf("no commit %+v %+v", m, t))
+	}
 	if m.IsCommit() {
+		if !m.CheckCommit(t) {
+			panic(fmt.Sprintf("t:%+v m:%+v", t, m))
+		}
 		//不允许修改
-		return
+		return false
+	}
+	//有可能有的地方没有accept
+	if !m.IsAccept() {
+		m.AcceptVote = t.CommitVote
 	}
 	//commite是最终决定的值
-	m.CommitVote = commitVote
-	m.State = PAXOS_MSG_HAS_COMMITED
+	m.CommitVote = t.CommitVote
+	m.State = t.State //有可能已经failed了
+	return true
 }
 
 type ClientReq struct {
@@ -152,20 +215,21 @@ func (m *PaCommnMsg) SetFrom(id int, flowtype int32) {
 
 //接受一个提议
 func (m *PaCommnMsg) Propose(t *PaCommnMsg) {
-
 	m.Vt.SetPropose(&t.Vt)
 }
 
 func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, retry bool) {
 
-	if m.Vt.IsAccept() {
-		//我已经accept了，没有意义接受这个阶段
-		return
+	if t.Vt.IsAccept() {
+		//有可能t已经commit了
+		//不可能这里还是可以提交的还能走到这里的逻辑
+		panic(fmt.Sprintf("impossible proposeack  nodid:%d t:%+v m:%+v", nodeid, t, m))
 	}
 
-	if t.Vt.IsAccept() {
-		m.Vt.SetAccept(&t.Vt)
-		//通知下游已经失败
+	if m.Vt.IsAccept() {
+		//我已经accept了，没有意义接受这个阶段
+		//一定要我先accept别人，在判断自己是否已经accept，这里顺序很重要
+		//无效的请求
 		return
 	}
 
@@ -250,12 +314,17 @@ func (m *PaCommnMsg) AddAccepList(t VoteInfo) {
 	m.AcceptList = append(m.AcceptList, t)
 }
 
-func (m *PaCommnMsg) Accept(t *PaCommnMsg) bool {
-	return m.Vt.SetAccept(&t.Vt)
+func (m *PaCommnMsg) Accept(t *PaCommnMsg, bFroce bool) bool {
+	return m.Vt.SetAccept(&t.Vt, bFroce)
+}
+
+func (m *PaCommnMsg) Commit(t *PaCommnMsg) bool {
+	return m.Vt.SetCommit(&t.Vt)
 }
 
 func (m *PaCommnMsg) AcceptAck(t *PaCommnMsg, membernum int) (accept bool, acceptvote int) {
 	//if !t.Vt.IsAccept() || !m.Vt.IsAccept() {
+	acceptvote = -1
 	if !m.Vt.IsAccept() {
 		//对方不会将t的状态进行降级
 		//我请求了对方，但是对方认为你的proposeid比较低而且不是accept的状态，可能还是处在propose的状态，但是我已经accept了，不需要你，拒绝了你
@@ -263,11 +332,14 @@ func (m *PaCommnMsg) AcceptAck(t *PaCommnMsg, membernum int) (accept bool, accep
 	}
 
 	if m.Vt.IsCommit() {
+		if !m.Vt.CheckCommit(&t.Vt) {
+			panic(fmt.Sprintf("seq:%d m:%+v \n t:%+v\n", t.Vt.Seq))
+		}
 		return
 	}
 
 	if t.Vt.IsCommit() {
-		m.Vt.SetCommit(t.Vt.CommitVote)
+		m.Vt.SetCommit(&t.Vt)
 		//清理一下当前的存储
 		m.AcceptList = m.AcceptList[:0]
 		accept = true
@@ -276,55 +348,67 @@ func (m *PaCommnMsg) AcceptAck(t *PaCommnMsg, membernum int) (accept bool, accep
 	}
 
 	//时刻保持最大proposeid
-	m.Vt.UpdateProposeid(&t.Vt)
+	//我已经accept了，没有必要再更新最大的proposeid了
+	//bBigger := m.Vt.UpdateProposeid(&t.Vt)
 
-	if !t.Vt.IsAccept() {
-		//对方没有接受，因为proposeid小,就不需要进入队列了
-		return
-	}
+	/*
+		if m.Vt.ProposeId < t.Vt.ProposeId {
+			fmt.Printf("[Warning]AcceptAck lk seq:%d t bigger than m :%+v than t:%+v\n ", t.Vt.Seq, t, m)
+		}
+	*/
 
-	bFind := false
+	//没有accept状态的这种也是要放入的，commit后就不用管了
 	for _, v := range m.AcceptList {
 		if v.FromId == t.Vt.FromId {
-			bFind = true
+			//只能响应收到一次数据，后边的数据不能改
 			return
 		}
 	}
 
-	if !bFind {
-		m.AcceptList = append(m.AcceptList, t.Vt)
-	}
+	m.AcceptList = append(m.AcceptList, t.Vt)
 
+	cnt := len(m.AcceptList)
+	var maxvale int
 	//所有的值都要处理
 	var mpvote = make(map[int]int) //vote
 	for _, v := range m.AcceptList {
-		if !v.IsAccept() {
-			continue
-		}
+		/*
+			if !v.IsAccept() {
+				continue
+			}
+		*/
+		//-1的可以当作失效处理统计
 		mpvote[v.AcceptVote]++
-	}
 
-	var cnt int
-	var maxvale int
+		vote := v.AcceptVote
+		votenum := mpvote[v.AcceptVote]
 
-	for vote, votenum := range mpvote {
 		if votenum >= (membernum>>1 + 1) {
-			//可以提交了接受一个值成功了
-			m.Vt.SetCommit(vote)
-			acceptvote = vote
 			accept = true
-			//todo broadcase commit
+			if vote < 0 {
+				//提交失败了，退出
+				m.Vt.SetFailed()
+			} else {
+				//可以提交了接受一个值成功了
+				acceptvote = vote
+				//todo broadcase commit
+				m.Vt.SetCommit(&VoteInfo{
+					AcceptVote: vote,
+					CommitVote: vote,
+					State:      PAXOS_MSG_HAS_COMMITED,
+				})
+			}
 			return
 		}
-		cnt += votenum
 		if maxvale < votenum {
 			maxvale = votenum
 		}
 	}
 	if (membernum - cnt + maxvale) < (membernum>>1 + 1) {
 		//谁都胜利不出
+		accept = true
 		fmt.Printf("impossiable accept vote success maxvale:%d membernum:%d cnt:%d  m:%+v t:%+v\n", maxvale, membernum, cnt, m, t)
-		m.Vt.State = PAXOS_MSG_HAS_FAILED
+		m.Vt.SetFailed()
 	}
 	//要检查是不是肯定不能成功了，检查所有的票状态
 	//感知到如果是空洞的话，这里提交的就失败了
