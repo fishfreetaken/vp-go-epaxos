@@ -10,13 +10,14 @@ const (
 )
 
 type VoteInfo struct {
-	ProposeId   int32
-	Seq         int64
-	ProposeVote int //提议阶段的选择
-	AcceptVote  int //接受阶段的选择
-	CommitVote  int //最终提交的值
-	FromId      int
-	State       int32
+	ProposeId       int32
+	Seq             int64
+	ProposeVote     int //提议阶段的选择
+	AcceptProposeId int32
+	AcceptVote      int //接受阶段的选择
+	CommitVote      int //最终提交的值
+	FromId          int
+	State           int32
 }
 
 func (m *VoteInfo) UpdateProposeid(t *VoteInfo) bool {
@@ -63,6 +64,7 @@ func (m *VoteInfo) SetPropose(t *VoteInfo) bool {
 		t.UpdateProposeid(m)
 		t.AcceptVote = m.AcceptVote
 		t.CommitVote = m.CommitVote
+		t.AcceptProposeId = m.AcceptProposeId
 		t.State = m.State
 		return false
 	}
@@ -72,7 +74,7 @@ func (m *VoteInfo) SetPropose(t *VoteInfo) bool {
 	return true
 }
 
-func (m *VoteInfo) SetAccept(t *VoteInfo, bForce bool) (suc bool) {
+func (m *VoteInfo) SetAccept(t *VoteInfo) (suc bool) {
 	if !t.IsAccept() {
 		panic(fmt.Sprintf("no valid t local proposeid:%d t:%+v\n", m.ProposeId, t))
 	}
@@ -100,22 +102,20 @@ func (m *VoteInfo) SetAccept(t *VoteInfo, bForce bool) (suc bool) {
 		return
 	}
 
-	if bForce && m.IsAccept() {
-		panic(fmt.Sprintf("invalid v:%+v t:%+v", m, t))
-	}
-
 	if m.IsAccept() {
 		//有可能已经commit,所以要赋值给state
 		t.State = m.State
 		t.AcceptVote = m.AcceptVote
+		t.AcceptProposeId = m.AcceptProposeId
 		t.CommitVote = m.CommitVote
 		return
 	}
 
 	//不接受低的proposid的accept
-	if !bForce && m.ProposeId > t.ProposeId {
+	if m.AcceptProposeId > t.AcceptProposeId {
 		//t的状态需要重置
-		t.UpdateProposeid(m)
+		//都acce了，不需要关心这个proposeid了把
+		//t.UpdateProposeid(m)
 		t.State = PAXOS_MSG_BEGIN_PROPOSE
 		t.AcceptVote = -1
 		return
@@ -125,6 +125,7 @@ func (m *VoteInfo) SetAccept(t *VoteInfo, bForce bool) (suc bool) {
 	//m.UpdateProposeid(t)
 	suc = true
 	//真正的accept
+	m.AcceptProposeId = t.AcceptProposeId
 	m.AcceptVote = t.AcceptVote
 	m.State = PAXOS_MSG_HAS_ACCEPTED
 	return
@@ -142,11 +143,14 @@ func (m *VoteInfo) SetSelfareCommit() {
 }
 
 func (m *VoteInfo) CheckCommit(t *VoteInfo) bool {
-	if m.State == t.State && m.State == PAXOS_MSG_HAS_COMMITED {
+	if m.State == PAXOS_MSG_HAS_COMMITED && m.State == t.State {
 		if m.CommitVote != t.CommitVote {
 			return false
 			//panic(fmt.Sprintf("m:%+v  t:%+v\n", m, t))
 		}
+	}
+	if t.AcceptProposeId == m.AcceptProposeId && t.AcceptVote != m.AcceptVote {
+		return false
 	}
 	return true
 }
@@ -220,13 +224,13 @@ func (m *PaCommnMsg) Propose(t *PaCommnMsg) {
 
 func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, retry bool) {
 
-	if t.Vt.IsAccept() {
+	if t.IsAccept() {
 		//有可能t已经commit了
 		//不可能这里还是可以提交的还能走到这里的逻辑
 		panic(fmt.Sprintf("impossible proposeack  nodid:%d t:%+v m:%+v", nodeid, t, m))
 	}
 
-	if m.Vt.IsAccept() {
+	if m.IsAccept() {
 		//我已经accept了，没有意义接受这个阶段
 		//一定要我先accept别人，在判断自己是否已经accept，这里顺序很重要
 		//无效的请求
@@ -289,6 +293,7 @@ func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, 
 			cnt++
 		}
 	}
+
 	//是否可以进入accept状，我自己有可能投票给别人
 	if cnt >= (membersNum>>1 + 1) {
 		//这里采用的是自己先accept再，让其他人继续accept ，默认是自己已经accept
@@ -297,6 +302,7 @@ func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, 
 		//只能接受自己
 		m.Vt.State = PAXOS_MSG_HAS_ACCEPTED
 		m.Vt.AcceptVote = nodeid
+		m.Vt.AcceptProposeId = m.Vt.ProposeId
 
 		//先接受自己
 		m.AddAccepList(m.Vt)
@@ -314,8 +320,8 @@ func (m *PaCommnMsg) AddAccepList(t VoteInfo) {
 	m.AcceptList = append(m.AcceptList, t)
 }
 
-func (m *PaCommnMsg) Accept(t *PaCommnMsg, bFroce bool) bool {
-	return m.Vt.SetAccept(&t.Vt, bFroce)
+func (m *PaCommnMsg) Accept(t *PaCommnMsg) bool {
+	return m.Vt.SetAccept(&t.Vt)
 }
 
 func (m *PaCommnMsg) Commit(t *PaCommnMsg) bool {

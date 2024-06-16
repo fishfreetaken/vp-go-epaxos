@@ -227,7 +227,7 @@ func (m *PaNode) CalcLastReport() string {
 		//
 		if vt.iCode == PANODE_RESULT_BIG_PROPOSEID {
 			cnt2++
-		} else if vt.iCode == PANODE_RESULT_OTHER_ACCEPT {
+		} else if vt.iCode == PANODE_RESULT_OTHER_ACCEPT || vt.iCode == PANODE_RESULT_COMMIT {
 			cnt3++
 		} else if vt.iCode == PANODE_RESULT_IMPOSSIBLE {
 			cnt4++
@@ -381,7 +381,7 @@ func (m *PaNode) Accept(t *PaCommnMsg, r *PaCommnMsg) {
 		panic(fmt.Sprintf("id:%d tmsg:%+v", m.id, t))
 	}
 	FromId := t.Vt.FromId
-	bSuc := r.Accept(t, false)
+	bSuc := r.Accept(t)
 	if bSuc && r.Vt.AcceptVote != m.id {
 		//fmt.Printf("[DEBUG]Accept invalid id:%d t:%+v r:%+v\n", m.id, t, r)
 		//自己接受了，但是不是自己的值，这里其实已经失败了
@@ -395,7 +395,7 @@ func (m *PaNode) Accept(t *PaCommnMsg, r *PaCommnMsg) {
 
 func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 	if r.IsCommit() {
-		//补充一个，如果自己预先已经commit了，将这个结果补充进去(千万不要以为自己想通了就删掉)
+		//补充一个，如果自己预先已经commit了，将这个结果补充进去(千万不要以为自己想通了就删掉,之前删除过一次，遇到阻塞又加回来了)
 		m.ResultReport(r, PANODE_RESULT_COMMIT)
 		return
 	}
@@ -416,17 +416,23 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 		tmpProposeId := t.Vt.ProposeId
 		//更新这个t的accept值
 		//这时候是强制要接受这个值的，不需要比较proposeid
-		//t.Vt.UpdateProposeid(&r.Vt)
+		//这里如果是0就尴尬了，后边引入0还是要放弃这个判断的
+		/*
+			if t.Vt.AcceptVote == m.id {
+				//我自己都没有accept，远处传来一个accept，肯定异常的
+				panic(fmt.Sprintf("seq:%d self:%d", t.Vt.Seq, m.id))
+			}
+		*/
+		//还是不能强制accept
 
-		if t.Vt.AcceptVote == m.id {
-			//我自己都没有accept，远处传来一个accept，肯定异常的
-			panic(fmt.Sprintf("seq:%d self:%d", t.Vt.Seq, m.id))
+		//beforMsg := *r
+		if !r.Accept(t) {
+			//这里还是有可能因为proposeid而accept失败的，这种情况就需要忽略
+			//fmt.Printf("[Debug] accept failed nodeid:%d t:%+v r:%+v\n", m.id, t, r)
+			return
 		}
-		//这个是要强制accept的了，不需要判断id了
-		if !r.Accept(t, true) {
-			panic(fmt.Sprintf("accept failed nodeid:%d t:%+v r:%+v", m.id, t, r))
-		}
-		//if r.Vt.ProposeId > tProposeId {
+		//fmt.Printf("[Debug] accept suc nodeid:%d t:%+v \nr:%+v \nbeforMsg:%+v\n", m.id, t, r, beforMsg)
+
 		if !t.IsAccept() || !r.IsAccept() {
 			panic(fmt.Sprintf("loc:%d t:%+v r:%+v", m.id, t, r))
 		}
@@ -440,7 +446,6 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 		m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
 		//fmt.Printf("ProposeAck failed need to get new propose :%+v\n", newres)
 		//到这里自己的就需要主动放弃，寻求新的提议了
-		//}
 		//这里还不能决定到底有没有成功，只是当此的提交已经失败了
 		return
 	}

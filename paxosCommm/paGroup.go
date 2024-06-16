@@ -99,11 +99,11 @@ func (m *PaGroup) Report(seq int64) {
 	var printRc = func() {
 		for key, v := range rc {
 			fmt.Printf("vote:%d list:%+v \n", key, v)
+		}
 
-			//把手下每一个有问题的msg都打印出来，我就不信了
-			for _, idx := range v {
-				fmt.Printf("sub idx:%d msg:%+v\n", idx, m.list[idx].GetSeqMsg(seq))
-			}
+		//把手下每一个有问题的msg都打印出来，我就不信了
+		for idx := range m.list {
+			fmt.Printf("sub idx:%d msg:%+v\n", idx, m.list[idx].GetSeqMsg(seq))
 		}
 	}
 
@@ -118,9 +118,9 @@ func (m *PaGroup) Report(seq int64) {
 	} else if tmplocalgp != masterIdx {
 		m.invalid++
 		if masterIdx == -1 {
-			fmt.Printf("node not equal seq:%d localresult:%d masteridx:%d \n", seq, tmplocalgp, masterIdx)
+			fmt.Printf("1 node not equal seq:%d localresult:%d masteridx:%d \n", seq, tmplocalgp, masterIdx)
 		} else {
-			fmt.Printf("node not equal seq:%d localresult:%d masteridx:%d msg:%+v\n", seq, tmplocalgp, masterIdx, m.list[masterIdx].GetSeqMsg(seq))
+			fmt.Printf("2 node not equal seq:%d localresult:%d masteridx:%d msg:%+v\n", seq, tmplocalgp, masterIdx, m.list[masterIdx].GetSeqMsg(seq))
 		}
 	} else {
 		fmt.Printf("seq:%d not desicde \n", seq)
