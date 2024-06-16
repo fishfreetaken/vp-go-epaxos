@@ -32,7 +32,7 @@ type PaNode struct {
 }
 
 func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
-	for i := 0; i < 700; i++ {
+	for i := 0; i < 1000; i++ {
 		m.veclk = append(m.veclk, sync.Mutex{})
 	}
 
@@ -40,7 +40,7 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
 	m.mpLocPropose = make(map[int64]*AckState)
 	m.seqmap = make(map[int64]int64)
 	m.g = g
-	m.reportmsg = make(chan int64, membernum*2)
+	m.reportmsg = make(chan int64, membernum*10)
 }
 
 func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
@@ -155,7 +155,7 @@ func (m *PaNode) AsyncWork(wg *sync.WaitGroup) {
 
 func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	//设置一个15秒的超时时间
-	t := time.NewTicker(time.Second * 15)
+	t := time.NewTicker(time.Second * 60)
 
 	defer func() {
 		fmt.Printf("node id:%d has done\n", m.id)
@@ -295,19 +295,19 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, iCurInstance, v.(*PaCommnMsg)))
 		}
 	} else {
-		if result != PANODE_RESULT_COMMIT {
-			if v.(*PaCommnMsg).Vt.IsCommit() {
-				if v.(*PaCommnMsg).Vt.CommitVote == m.id {
-					panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
-				}
-			} else if v.(*PaCommnMsg).Vt.IsAccept() {
-				if v.(*PaCommnMsg).Vt.AcceptVote == m.id {
-					panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
-				}
+
+		if v.(*PaCommnMsg).Vt.IsCommit() {
+			if v.(*PaCommnMsg).Vt.CommitVote == m.id {
+				panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
 			}
-			//fmt.Printf("ResultReport node:%d instacnid:%d result:%d value:%+v invalid msg:%+v\n", m.id, r.InstanceId, result, value, v.(*PaCommnMsg))
-			//return -1
+		} else if v.(*PaCommnMsg).Vt.IsAccept() {
+			if v.(*PaCommnMsg).Vt.AcceptVote == m.id {
+				panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
+			}
 		}
+		//fmt.Printf("ResultReport node:%d instacnid:%d result:%d value:%+v invalid msg:%+v\n", m.id, r.InstanceId, result, value, v.(*PaCommnMsg))
+		//return -1
+
 		//fmt.Printf("ResultReport need retry id:%d seqid:%d instanc:%d resultCode:%d  msg:%+v\n", m.id, r.Vt.Seq, iCurInstance, result, r)
 		//如果失败了就要发起重试
 		//这里需要异步的重试
@@ -413,7 +413,7 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 		*/
 		//异常已经accept的情况
 		//fmt.Printf("iProposeAck has accepvote loc:%d seq:%d r:%+v t:%+v\n", m.id, t.Vt.Seq, r.Vt, t.Vt)
-		tmpProposeId := t.Vt.ProposeId
+		//tmpProposeId := t.Vt.ProposeId
 		//更新这个t的accept值
 		//这时候是强制要接受这个值的，不需要比较proposeid
 		//这里如果是0就尴尬了，后边引入0还是要放弃这个判断的
@@ -432,17 +432,18 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 			return
 		}
 		//fmt.Printf("[Debug] accept suc nodeid:%d t:%+v \nr:%+v \nbeforMsg:%+v\n", m.id, t, r, beforMsg)
-
 		if !t.IsAccept() || !r.IsAccept() {
 			panic(fmt.Sprintf("loc:%d t:%+v r:%+v", m.id, t, r))
 		}
 		//只能帮忙广播一次，最大的值进行广播，不一定会有广播，只是原封不动将这个t转发出去
 		//不一定是提出者的
-		if tmpProposeId <= r.Vt.ProposeId {
-			t.SetFrom(t.Vt.AcceptVote, t.Flowtype)
-			//fmt.Printf("Async go help accept loc:%d seq:%d t:%+v r:%+v\n", m.id, t.Vt.Seq, t, r)
-			go m.g.Broadcastexcept(*t, m.id)
-		}
+		/*
+			if tmpProposeId <= r.Vt.ProposeId {
+				t.SetFrom(t.Vt.AcceptVote, t.Flowtype)
+				//fmt.Printf("Async go help accept loc:%d seq:%d t:%+v r:%+v\n", m.id, t.Vt.Seq, t, r)
+				go m.g.Broadcastexcept(*t, m.id)
+			}
+		*/
 		m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
 		//fmt.Printf("ProposeAck failed need to get new propose :%+v\n", newres)
 		//到这里自己的就需要主动放弃，寻求新的提议了
@@ -495,14 +496,7 @@ func (m *PaNode) AcceptAck(t *PaCommnMsg, r *PaCommnMsg) {
 			FromId:      m.id,
 		})
 
-		go m.g.Broadcastexcept(PaCommnMsg{
-			Vt:         r.Vt,
-			Flowtype:   PAXOS_MSG_COMMIT,
-			InstanceId: r.InstanceId,
-			Body:       r.Body,
-		}, m.id)
-
-		fmt.Printf("[TRACE][AcceptAck]commit done id:%d seq:%d acceptVoted:%d vt:%+v  r:%+v \n", m.id, t.Vt.Seq, acceptVoted, t, r)
+		//fmt.Printf("[TRACE][AcceptAck]commit done id:%d seq:%d acceptVoted:%d vt:%+v  r:%+v \n", m.id, t.Vt.Seq, acceptVoted, t, r)
 		//最后再通知自己结果，这样的话，所有人就可以等到自己的结果了
 		if acceptVoted != m.id {
 			if r.Vt.IsFailed() {
@@ -513,6 +507,14 @@ func (m *PaNode) AcceptAck(t *PaCommnMsg, r *PaCommnMsg) {
 		} else {
 			//只通知自己成功了
 			m.ResultReport(r, PANODE_RESULT_SUC)
+			//有可能别人帮他提交的
+			//减少通信的次数
+			go m.g.Broadcastexcept(PaCommnMsg{
+				Vt:         r.Vt,
+				Flowtype:   PAXOS_MSG_COMMIT,
+				InstanceId: r.InstanceId,
+				Body:       r.Body,
+			}, m.id)
 		}
 	}
 }

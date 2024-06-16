@@ -21,7 +21,7 @@ func TestSetVoteInfoAccept(t *testing.T) {
 		AcceptVote:  0,
 		State:       0,
 	}
-	fmt.Println(r.SetAccept(&sv, false), r.IsAccept())
+	fmt.Println(r.SetAccept(&sv), r.IsAccept())
 
 	fmt.Printf("sv:%+v r:%+v\n", sv, r)
 
