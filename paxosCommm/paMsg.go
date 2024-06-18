@@ -79,13 +79,6 @@ func (m *VoteInfo) SetAccept(t *VoteInfo) (suc bool) {
 		panic(fmt.Sprintf("no valid t local proposeid:%d t:%+v\n", m.ProposeId, t))
 	}
 
-	/*
-		//这里其实没有必要再进行更新proposeid了
-		defer func() {
-			t.UpdateProposeid(m)
-		}()
-	*/
-
 	if t.ProposeId == m.ProposeId && t.ProposeVote != m.ProposeVote {
 		panic(fmt.Sprintf("uniq proposeid vote diff t:%+v m:%+v\n", t, m))
 	}

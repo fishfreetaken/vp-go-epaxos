@@ -23,7 +23,8 @@ type PaGroup struct {
 }
 
 func (m *PaGroup) Sendto(idx int, st PaCommnMsg) {
-	m.list[idx].Recv(st)
+	//m.list[idx].Recv(st)
+	m.list[idx].Recv2(st)
 }
 
 func (m *PaGroup) Index(idx int) *PaNode {
@@ -190,6 +191,7 @@ func (m *PaGroup) Init(membernum int) {
 	}
 	m.recvseq = make(chan VoteInfo, 2000)
 	m.mpResult = make(map[int64]int)
+
 	//异步统计所有的结果的通知
 	go m.AsyncWaitResult()
 }

@@ -22,6 +22,8 @@ type PaNode struct {
 
 	veclk []sync.Mutex
 
+	vecChans []chan PaCommnMsg
+
 	//每一个提交都建立一个唯一的事件id，这个id还是需要放到
 	instanceid int64
 	seqmap     map[int64]int64 //我要知道哪些是我自己的提出来的 ,key to instanceid
@@ -34,6 +36,16 @@ type PaNode struct {
 func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
 	for i := 0; i < 1000; i++ {
 		m.veclk = append(m.veclk, sync.Mutex{})
+	}
+
+	channum := membernum * 200
+	m.vecChans = make([]chan PaCommnMsg, channum)
+	for i := 0; i < channum; i++ {
+		m.vecChans[i] = make(chan PaCommnMsg, channum)
+	}
+
+	for i := 0; i < channum; i++ {
+		go m.Step2(i)
 	}
 
 	//在本地的函数中创建，在外边创建找不到
@@ -68,7 +80,6 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 			Body:       req,
 			InstanceId: iCurInstanceId,
 		}
-		//cm.ProposeList = append(cm.ProposeList, cm.Vt)
 		_, load := m.dict.LoadOrStore(iCurSeq, &cm)
 		if !load {
 			//fmt.Printf("nodeid:%d begin goto seq:%d to proposeid:%d cm:%+v cm:%p\n", m.id, iCurSeq, proposeid, cm, &cm)
@@ -94,10 +105,12 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 	}
 	//fmt.Printf("[debug]NewProPoseMsg succnode:%d seq:%d instid:%d\n", m.id, iCurSeq, iCurInstanceId)
 	//本地先注册
-	//fmt.Printf("nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
+	//fmt.Printf("before nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	m.RegisterSeq(res)
+	//fmt.Printf("mid nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	//不需要等待
-	m.g.Broadcast(res)
+	m.g.Broadcastexcept(*res, m.id)
+	//fmt.Printf("after nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	return res
 }
 
@@ -157,6 +170,7 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	//设置一个15秒的超时时间
 	t := time.NewTicker(time.Second * 60)
 
+	recvCnt := 0
 	defer func() {
 		fmt.Printf("node id:%d has done\n", m.id)
 		wg.Done()
@@ -166,11 +180,20 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	for {
 		select {
 		case v := <-m.reportmsg:
+			recvCnt++
 			//都1️以最终的衡量
 			bAllPass := true
 			func() {
+				if recvCnt < len(m.mpLocPropose) {
+					//避免全量轮训耗时增加
+					bAllPass = false
+					return
+				} else if recvCnt > len(m.mpLocPropose) {
+					panic(fmt.Sprintf("recvCnt:%d mp:%d v:%+v", recvCnt, len(m.mpLocPropose), v))
+				}
 				m.lk.Lock()
 				defer m.lk.Unlock()
+
 				for _, st := range m.mpLocPropose {
 					/*
 						if v.iCode != PANODE_RESULT_SUC {
@@ -315,7 +338,15 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 	return 0
 }
 
-func (m *PaNode) Step(t *PaCommnMsg) {
+func (m *PaNode) Step2(idx int) {
+	for msg := range m.vecChans[idx] {
+		//fmt.Printf("step2 id:%d idx:%d msg:%+v", m.id, idx, msg)
+		//这里区分渠道进行处理，减少go的产生
+		m.Step(&msg, false)
+	}
+}
+
+func (m *PaNode) Step(t *PaCommnMsg, bLock bool) {
 	//fmt.Printf("step except i:%d from:%d seq:%d flowtye:%d\n  ", m.id, t.Vt.FromId, t.GetSeqID(), t.Flowtype)
 	//每次要更新最大的seq值
 	for {
@@ -330,8 +361,10 @@ func (m *PaNode) Step(t *PaCommnMsg) {
 		}
 	}
 
-	m.veclk[int(t.GetSeqID())%len(m.veclk)].Lock()
-	defer m.veclk[int(t.GetSeqID())%len(m.veclk)].Unlock()
+	if bLock {
+		m.veclk[int(t.GetSeqID())%len(m.veclk)].Lock()
+		defer m.veclk[int(t.GetSeqID())%len(m.veclk)].Unlock()
+	}
 
 	r := m.GetSeqMsg(t.GetSeqID())
 
@@ -346,7 +379,6 @@ func (m *PaNode) Step(t *PaCommnMsg) {
 	case PAXOS_MSG_ACCEPT_ACK:
 		m.AcceptAck(t, r)
 	case PAXOS_MSG_COMMIT:
-		//todo 收到这个消息才算确认最终的值
 		m.Commit(t, r)
 	default:
 		fmt.Printf("nodeid:%d invalid flow type t:%+v m:%+v", m.id, t, r)
@@ -507,7 +539,7 @@ func (m *PaNode) AcceptAck(t *PaCommnMsg, r *PaCommnMsg) {
 		} else {
 			//只通知自己成功了
 			m.ResultReport(r, PANODE_RESULT_SUC)
-			//有可能别人帮他提交的
+			//有可能别人帮他提交的，允许这种情况出现
 			//减少通信的次数
 			go m.g.Broadcastexcept(PaCommnMsg{
 				Vt:         r.Vt,
@@ -540,5 +572,9 @@ func (m *PaNode) GetId() int {
 }
 
 func (m *PaNode) Recv(t PaCommnMsg) {
-	go m.Step(&t)
+	go m.Step(&t, true)
+}
+
+func (m *PaNode) Recv2(t PaCommnMsg) {
+	m.vecChans[int(t.GetSeqID())%len(m.vecChans)] <- t
 }
