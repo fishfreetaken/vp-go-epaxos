@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"sync"
+	"time"
 	paxoscommm "vp-go-epaxos/paxosCommm"
 )
 
@@ -23,49 +24,70 @@ func SetupPProf() {
 
 func main() {
 	go SetupPProf()
-	seqNum := 10000
+	seqNum := 800000
 	nodenumber := 11
 
+	/*
+		f, _ := os.Create("myTrace.dat")
+		defer f.Close()
+		_ = trace.Start(f)
+		defer trace.Stop()
+	*/
 	//GoTest(nodenumber, seqNum)
+	var gClose = make(chan int)
 
+	gt := time.NewTicker(time.Second * 60)
 	//return
+	go func() {
+		var g paxoscommm.PaGroup
+		g.Init(nodenumber)
 
-	var g paxoscommm.PaGroup
-	g.Init(nodenumber)
+		var wg sync.WaitGroup
+		for i := 0; i < seqNum; i++ {
+			wg.Add(5)
+			go func() {
+				g.Index(5).NewProPoseMsg(nil, 0)
+				wg.Done()
+			}()
+			go func() {
+				g.Index(8).NewProPoseMsg(nil, 0)
+				wg.Done()
+			}()
 
-	var wg sync.WaitGroup
-	for i := 0; i < seqNum; i++ {
-		wg.Add(5)
-		go func() {
-			g.Index(5).NewProPoseMsg(nil, 0)
-			wg.Done()
-		}()
-		go func() {
-			g.Index(8).NewProPoseMsg(nil, 0)
-			wg.Done()
-		}()
+			go func() {
+				g.Index(2).NewProPoseMsg(nil, 0)
+				wg.Done()
+			}()
 
-		go func() {
-			g.Index(2).NewProPoseMsg(nil, 0)
-			wg.Done()
-		}()
+			go func() {
+				g.Index(9).NewProPoseMsg(nil, 0)
+				wg.Done()
+			}()
 
-		go func() {
-			g.Index(9).NewProPoseMsg(nil, 0)
-			wg.Done()
-		}()
+			go func() {
+				g.Index(1).NewProPoseMsg(nil, 0)
+				wg.Done()
+			}()
 
-		go func() {
-			g.Index(1).NewProPoseMsg(nil, 0)
-			wg.Done()
-		}()
+		}
+		fmt.Printf("wait 0 \n")
+		wg.Wait()
+		fmt.Printf("wait 1 \n")
+		g.WaitForNode()
+		fmt.Printf("wait 2 \n")
+
+		//time.Sleep(time.Millisecond * 500)
+		//每一个seq值都需要check一下最后的结果
+
+		g.ResultCheck()
+		gClose <- 1
+	}()
+
+	select {
+	case <-gClose:
+		fmt.Printf("last close \n")
+	case <-gt.C:
+		fmt.Printf("last timeout \n")
+		gt.Stop()
 	}
-	wg.Wait()
-
-	g.WaitForNode()
-
-	//time.Sleep(time.Millisecond * 500)
-	//每一个seq值都需要check一下最后的结果
-
-	g.ResultCheck()
 }

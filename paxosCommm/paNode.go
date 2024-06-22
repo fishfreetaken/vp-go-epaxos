@@ -26,7 +26,7 @@ type PaNode struct {
 
 	//每一个提交都建立一个唯一的事件id，这个id还是需要放到
 	instanceid int64
-	seqmap     map[int64]int64 //我要知道哪些是我自己的提出来的 ,key to instanceid
+	//seqmap     map[int64]int64 //我要知道哪些是我自己的提出来的 ,key to instanceid
 
 	//当前的
 	curseq int64
@@ -50,7 +50,7 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
 
 	//在本地的函数中创建，在外边创建找不到
 	m.mpLocPropose = make(map[int64]*AckState)
-	m.seqmap = make(map[int64]int64)
+	//m.seqmap = make(map[int64]int64)
 	m.g = g
 	m.reportmsg = make(chan int64, membernum*10)
 }
@@ -61,10 +61,14 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 	var proposeid int32
 	iCurInstanceId := atomic.AddInt64(&m.instanceid, 1)
 
+	//fmt.Printf("new msg node:%d instacneid:%d\n", m.id, iCurInstanceId)
+
 	if instacnid != 0 {
 		//用已有的进行注册
 		iCurInstanceId = instacnid
 	}
+
+	//var cmmsg *PaCommnMsg
 	for {
 		proposeid = m.BuildProposeId()
 
@@ -77,8 +81,7 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 				Seq:         iCurSeq,
 				FromId:      m.id,
 			},
-			Body:       req,
-			InstanceId: iCurInstanceId,
+			Body: req,
 		}
 		_, load := m.dict.LoadOrStore(iCurSeq, &cm)
 		if !load {
@@ -86,12 +89,13 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 			//这里中间可能会发生改变，这个seq值被其他人占用
 			if atomic.LoadInt32(&(cm.Vt.ProposeId)) <= proposeid {
 				//这个值已经被别的抢占小了，重新发起
+				cm.InstanceId = iCurInstanceId
+				//cmmsg = &cm
+				//fmt.Printf("nodeid:%d has load this seq:%d newCurSeq:%d value:%+v\n", m.id, iCurSeq, atomic.LoadInt64(&m.curseq), cm)
 				break
 			}
-
 		}
 		//这个值已经存在了，重新再找一个点
-		//fmt.Printf("nodeid:%d has load this seq:%d newCurSeq:%d value:%+v\n", m.id, iCurSeq, atomic.LoadInt64(&m.curseq), value)
 	}
 	res := &PaCommnMsg{
 		Vt: VoteInfo{
@@ -100,13 +104,14 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 			Seq:         iCurSeq,
 			FromId:      m.id,
 		},
-		InstanceId: iCurInstanceId,
-		Body:       req,
+		Body: req,
 	}
-	//fmt.Printf("[debug]NewProPoseMsg succnode:%d seq:%d instid:%d\n", m.id, iCurSeq, iCurInstanceId)
+
+	//fmt.Printf("[debug]NewProPoseMsg succnode:%d instid:%d seq:%d  cmmsg:%+v\n", m.id, iCurInstanceId, iCurSeq, cmmsg)
+
 	//本地先注册
 	//fmt.Printf("before nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
-	m.RegisterSeq(res)
+	m.RegisterSeq(iCurInstanceId, res)
 	//fmt.Printf("mid nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	//不需要等待
 	m.g.Broadcastexcept(*res, m.id)
@@ -123,7 +128,7 @@ const (
 )
 
 type AckState struct {
-	t     time.Time
+	//t     time.Time
 	seq   int64
 	iCode int //返回的结果 0
 }
@@ -133,17 +138,12 @@ func (m *PaNode) BuildProposeId() int32 {
 	return int32(rand.Intn(100000)*GetPosCount(m.g.GetNumber()) + m.id)
 }
 
-func (m *PaNode) RegisterSeq(msg *PaCommnMsg) {
+func (m *PaNode) RegisterSeq(instanceid int64, msg *PaCommnMsg) {
 	m.lk.Lock()
 	defer m.lk.Unlock()
-	m.seqmap[msg.GetSeqID()] = msg.InstanceId
-	if _, ok := m.mpLocPropose[msg.InstanceId]; ok {
-		//这个在重试之前应该不太可能
-		panic(fmt.Sprintf("has instanid:%d msg:%+v", m.id, msg))
-	}
 	//不管原来的是否存在
-	m.mpLocPropose[msg.InstanceId] = &AckState{
-		t:   time.Now(),
+	m.mpLocPropose[instanceid] = &AckState{
+		//t:   time.Now(),
 		seq: msg.GetSeqID(),
 	}
 }
@@ -271,31 +271,41 @@ func (m *PaNode) CalcLastReport() string {
 
 //异步发起进行重试
 func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
+	//check
+	/*
+		v, ok := m.dict.Load(r.Vt.Seq)
+		if !ok {
+			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, iCurInstance, v.(*PaCommnMsg)))
+		}
+	*/
+	if r.InstanceId == 0 {
+		//本地没有注册这个值
+		res = -1
+		return
+	}
+
 	m.lk.Lock()
-	var iCurInstance int64
-	var ok bool
 	defer func() {
 		m.lk.Unlock()
 		if res == 0 {
 			//只有正常了才能回传信息
-			m.reportmsg <- iCurInstance
+			m.reportmsg <- r.InstanceId
 		}
 	}()
-	iCurInstance, ok = m.seqmap[r.Vt.Seq]
-	if !ok {
-		//本地没有注册就不需要了
-		//会有一个乱序的问题，没有不代表以后没有
-		res = -1
-		return
-		//panic(fmt.Sprintf("ResultReport node:%d result:%d msg:%+v ", m.id, result, r))
-	}
+
 	//索引对应的seq
-	value, ok := m.mpLocPropose[iCurInstance]
+	value, ok := m.mpLocPropose[r.InstanceId]
 	if !ok {
-		//不可能会出现这种情况吧
-		panic(fmt.Sprintf("[warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v ", m.id, iCurInstance, result, r))
+		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接创建并保存这个结果
+		fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v ", m.id, r.InstanceId, result, r)
+		res = -1
+		//直接返回这个值，通过后边自身的学习去感知这个值
+		return
 	}
-	if value.seq != r.Vt.Seq || value.iCode != 0 {
+	if value.seq != r.Vt.Seq {
+		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d ins:%+v result:%d msg:%+v ", m.id, value, result, r))
+	}
+	if value.iCode != 0 {
 		//fmt.Printf("[warning]ResultReport not equal nodeid:%d instance id :%d valueseq:%d r seq:%d  resultcode:%d res:%d\n", m.id, iCurInstance, value.seq, r.Vt.Seq, value.iCode, result)
 		//insance所对应的seq已经发生变化，不需要进行处理
 		res = -3
@@ -303,29 +313,18 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 	}
 	value.iCode = result
 
-	//check
-	v, ok := m.dict.Load(value.seq)
-	if !ok {
-		panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, iCurInstance, v.(*PaCommnMsg)))
-	}
-
-	if v.(*PaCommnMsg).InstanceId != iCurInstance {
-		panic(fmt.Sprintf("r:%+v icur:%d", v, iCurInstance))
-	}
-
 	if result == PANODE_RESULT_SUC {
-		if v.(*PaCommnMsg).Vt.AcceptVote != m.id {
-			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, iCurInstance, v.(*PaCommnMsg)))
+		if r.Vt.AcceptVote != m.id {
+			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, r.InstanceId, r))
 		}
 	} else {
-
-		if v.(*PaCommnMsg).Vt.IsCommit() {
-			if v.(*PaCommnMsg).Vt.CommitVote == m.id {
-				panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
+		if r.Vt.IsCommit() {
+			if r.Vt.CommitVote == m.id {
+				panic(fmt.Sprintf("node:%d instacnid:%d result:%d invalid msg:%+v", m.id, r.InstanceId, result, r))
 			}
-		} else if v.(*PaCommnMsg).Vt.IsAccept() {
-			if v.(*PaCommnMsg).Vt.AcceptVote == m.id {
-				panic(fmt.Sprintf("node:%d instacnid:%d result:%d value:%+v invalid msg:%+v", m.id, iCurInstance, result, value, v.(*PaCommnMsg)))
+		} else if r.Vt.IsAccept() {
+			if r.Vt.AcceptVote == m.id {
+				panic(fmt.Sprintf("node:%d instacnid:%d result:%d  invalid msg:%+v", m.id, r.InstanceId, result, r))
 			}
 		}
 		//fmt.Printf("ResultReport node:%d instacnid:%d result:%d value:%+v invalid msg:%+v\n", m.id, r.InstanceId, result, value, v.(*PaCommnMsg))
@@ -335,6 +334,7 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		//如果失败了就要发起重试
 		//这里需要异步的重试
 	}
+
 	return 0
 }
 
@@ -367,6 +367,8 @@ func (m *PaNode) Step(t *PaCommnMsg, bLock bool) {
 	}
 
 	r := m.GetSeqMsg(t.GetSeqID())
+
+	//fmt.Printf("step nodid:%d r:%+v t:%+v\n", m.id, r, t)
 
 	//减少锁的力度
 	switch t.Flowtype {
@@ -415,7 +417,7 @@ func (m *PaNode) Accept(t *PaCommnMsg, r *PaCommnMsg) {
 	FromId := t.Vt.FromId
 	bSuc := r.Accept(t)
 	if bSuc && r.Vt.AcceptVote != m.id {
-		//fmt.Printf("[DEBUG]Accept invalid id:%d t:%+v r:%+v\n", m.id, t, r)
+		//fmt.Printf("[DEBUG]Accept invalid id:%d t:%+v r:%+v \n", m.id, t, r)
 		//自己接受了，但是不是自己的值，这里其实已经失败了
 		m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
 	}
@@ -490,10 +492,9 @@ func (m *PaNode) ProposeAck(t *PaCommnMsg, r *PaCommnMsg) {
 		//这里只能是接收自己
 		//接上accept的逻辑，挡住后边的请求，自己先accept
 		go m.g.Broadcastexcept(PaCommnMsg{
-			Vt:         r.Vt,
-			Flowtype:   PAXOS_MSG_ACCEPT,
-			InstanceId: r.InstanceId,
-			Body:       r.Body,
+			Vt:       r.Vt,
+			Flowtype: PAXOS_MSG_ACCEPT,
+			Body:     r.Body,
 		}, m.id)
 	} else if bretry {
 		//fmt.Printf("ProposeAck ProposeAck failed need to get new propose :%+v\n", newres)
@@ -542,10 +543,9 @@ func (m *PaNode) AcceptAck(t *PaCommnMsg, r *PaCommnMsg) {
 			//有可能别人帮他提交的，允许这种情况出现
 			//减少通信的次数
 			go m.g.Broadcastexcept(PaCommnMsg{
-				Vt:         r.Vt,
-				Flowtype:   PAXOS_MSG_COMMIT,
-				InstanceId: r.InstanceId,
-				Body:       r.Body,
+				Vt:       r.Vt,
+				Flowtype: PAXOS_MSG_COMMIT,
+				Body:     r.Body,
 			}, m.id)
 		}
 	}
@@ -563,6 +563,7 @@ func (m *PaNode) GetSeqMsg(seq int64) *PaCommnMsg {
 			FromId: m.id,
 		},
 	}
+	//有可能捞到自己提交的值
 	actMsgBody, _ := m.dict.LoadOrStore(seq, &msgbody)
 	return actMsgBody.(*PaCommnMsg)
 }
