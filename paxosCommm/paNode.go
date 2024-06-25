@@ -13,16 +13,18 @@ type PaNode struct {
 
 	priority int
 
+	//这个可以通过vector来进行切分
 	dict sync.Map //[int64]*PaCommnMsg
 
 	//这个只是用来进行保存本地提交的seq, 这个用instacneid to seqid key来触发处理
-	mpLocPropose map[int64]*AckState
-	lk           sync.Mutex
-	reportmsg    chan int64
+	// sync map还是防止并发
+	mpLocPropose sync.Map //map[int64]*AckState
 
-	veclk []sync.Mutex
+	reportmsg chan int64
 
 	vecChans []chan PaCommnMsg
+
+	msgChannel chan *ClientReq
 
 	//每一个提交都建立一个唯一的事件id，这个id还是需要放到
 	instanceid int64
@@ -33,15 +35,31 @@ type PaNode struct {
 	g      *PaGroup
 }
 
+func (m *PaNode) BeginNewCommit(r *ClientReq) {
+	r.Instanceid = atomic.AddInt64(&m.instanceid, 1)
+	m.msgChannel <- r
+}
+
+func (m *PaNode) ListNewMsg() {
+	for v := range m.msgChannel {
+		m.NewProPoseMsg(v)
+	}
+}
+
 func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
-	for i := 0; i < 1000; i++ {
-		m.veclk = append(m.veclk, sync.Mutex{})
+
+	if membernum < 3 {
+		panic(fmt.Sprintf("invalid member num:%d", membernum))
 	}
 
-	channum := membernum * 200
+	//初始化一个通道
+	m.msgChannel = make(chan *ClientReq, 800*membernum)
+	go m.ListNewMsg()
+
+	channum := membernum * 21
 	m.vecChans = make([]chan PaCommnMsg, channum)
 	for i := 0; i < channum; i++ {
-		m.vecChans[i] = make(chan PaCommnMsg, channum)
+		m.vecChans[i] = make(chan PaCommnMsg, channum*80)
 	}
 
 	for i := 0; i < channum; i++ {
@@ -49,26 +67,25 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
 	}
 
 	//在本地的函数中创建，在外边创建找不到
-	m.mpLocPropose = make(map[int64]*AckState)
+
 	//m.seqmap = make(map[int64]int64)
 	m.g = g
-	m.reportmsg = make(chan int64, membernum*10)
+	m.reportmsg = make(chan int64, membernum*20)
+
 }
 
-func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
+func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 	//获取当前进度的seqid
-	var iCurSeq int64
-	var proposeid int32
-	iCurInstanceId := atomic.AddInt64(&m.instanceid, 1)
 
-	//fmt.Printf("new msg node:%d instacneid:%d\n", m.id, iCurInstanceId)
-
-	if instacnid != 0 {
-		//用已有的进行注册
-		iCurInstanceId = instacnid
+	iCurInstanceId := req.Instanceid
+	if iCurInstanceId == 0 {
+		panic(fmt.Sprintf("nodeid:%d zero cur instanceid", m.id))
 	}
 
-	//var cmmsg *PaCommnMsg
+	var iCurSeq int64
+	var proposeid int32
+
+	//fmt.Printf("new msg node:%d instacneid:%d\n", m.id, iCurInstanceId)
 	for {
 		proposeid = m.BuildProposeId()
 
@@ -111,7 +128,11 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq, instacnid int64) *PaCommnMsg {
 
 	//本地先注册
 	//fmt.Printf("before nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
-	m.RegisterSeq(iCurInstanceId, res)
+	m.mpLocPropose.Store(iCurInstanceId, &AckState{
+		//t:   time.Now(),
+		seq: iCurSeq,
+	})
+
 	//fmt.Printf("mid nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	//不需要等待
 	m.g.Broadcastexcept(*res, m.id)
@@ -138,16 +159,6 @@ func (m *PaNode) BuildProposeId() int32 {
 	return int32(rand.Intn(100000)*GetPosCount(m.g.GetNumber()) + m.id)
 }
 
-func (m *PaNode) RegisterSeq(instanceid int64, msg *PaCommnMsg) {
-	m.lk.Lock()
-	defer m.lk.Unlock()
-	//不管原来的是否存在
-	m.mpLocPropose[instanceid] = &AckState{
-		//t:   time.Now(),
-		seq: msg.GetSeqID(),
-	}
-}
-
 const (
 	PANODE_RESULT_NOP           = iota //失效了
 	PANODE_RESULT_SUC           = 1    //成功
@@ -158,8 +169,7 @@ const (
 )
 
 func (m *PaNode) AsyncWork(wg *sync.WaitGroup) {
-	if len(m.reportmsg) == 0 {
-		//自己没有要处理的消息就不用等了
+	if atomic.LoadInt64(&m.instanceid) == 0 {
 		return
 	}
 	wg.Add(1)
@@ -170,7 +180,7 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	//设置一个15秒的超时时间
 	t := time.NewTicker(time.Second * 60)
 
-	recvCnt := 0
+	var recvCnt int64
 	defer func() {
 		fmt.Printf("node id:%d has done\n", m.id)
 		wg.Done()
@@ -184,17 +194,16 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 			//都1️以最终的衡量
 			bAllPass := true
 			func() {
-				if recvCnt < len(m.mpLocPropose) {
+				istancenum := atomic.LoadInt64(&m.instanceid)
+				if recvCnt < istancenum {
 					//避免全量轮训耗时增加
 					bAllPass = false
 					return
-				} else if recvCnt > len(m.mpLocPropose) {
-					panic(fmt.Sprintf("recvCnt:%d mp:%d v:%+v", recvCnt, len(m.mpLocPropose), v))
+				} else if recvCnt > istancenum {
+					panic(fmt.Sprintf("recvCnt:%d mp:%d v:%+v", recvCnt, istancenum, v))
 				}
-				m.lk.Lock()
-				defer m.lk.Unlock()
-
-				for _, st := range m.mpLocPropose {
+				m.mpLocPropose.Range(func(key, value interface{}) bool {
+					st := value.(*AckState)
 					/*
 						if v.iCode != PANODE_RESULT_SUC {
 							bAllPass = false
@@ -202,8 +211,10 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 					*/
 					if st.iCode == PANODE_RESULT_NOP {
 						bAllPass = false
+						return false
 					}
-				}
+					return true
+				})
 			}()
 			if bAllPass {
 				fmt.Printf("AsyncReportAndRetry suc new all pass id:%d retry insid:%+v\n", m.id, v)
@@ -212,19 +223,20 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 		case <-t.C:
 			var noDecideList []int64
 			func() {
-				m.lk.Lock()
-				defer m.lk.Unlock()
-				for key, v := range m.mpLocPropose {
+				m.mpLocPropose.Range(func(key, value interface{}) bool {
+					instanceid := key.(int64)
+					v := value.(*AckState)
 					/*
 						if v.iCode != PANODE_RESULT_SUC {
 							noDecideList = append(noDecideList, key)
 						}
 					*/
 					if v.iCode == 0 {
-						noDecideList = append(noDecideList, key)
-						fmt.Printf("no decide msg detail nodeid:%d instanceid :%d seq:%d msgdetail:%+v\n", m.id, key, v.seq, m.GetSeqMsg(v.seq))
+						noDecideList = append(noDecideList, instanceid)
+						fmt.Printf("no decide msg detail nodeid:%d instanceid :%d seq:%d msgdetail:%+v\n", m.id, instanceid, v.seq, m.GetSeqMsg(v.seq))
 					}
-				}
+					return true
+				})
 			}()
 			fmt.Printf("AsyncReportAndRetry timeout nodeid:%d nodecidelist:%+v\n", m.id, noDecideList)
 			return
@@ -239,7 +251,10 @@ func (m *PaNode) CalcLastReport() string {
 	var cnt3 int
 	var cnt4 int
 	var cntimpossible int
-	for instanceid, vt := range m.mpLocPropose {
+
+	m.mpLocPropose.Range(func(key, value interface{}) bool {
+		instanceid := key.(int64)
+		vt := value.(*AckState)
 		//查看每一个inst是否满足ok
 		v, ok := m.dict.Load(vt.seq)
 		if !ok {
@@ -265,8 +280,9 @@ func (m *PaNode) CalcLastReport() string {
 			fmt.Printf("invalid stata nodeid:%d seq:%d ins:%d code:%d t:%+v\n", m.id, vt.seq, instanceid, vt.iCode, pMsg)
 			cntimpossible++
 		}
-	}
-	return fmt.Sprintf("CalcLastReport [nodeid:%d][total:%d][suc:%d][bigpropose:%d][other_accept:%d][impossible:%d][other_case:%d]", m.id, len(m.mpLocPropose), cntsuc, cnt2, cnt3, cnt4, cntimpossible)
+		return true
+	})
+	return fmt.Sprintf("CalcLastReport [nodeid:%d][total:%d][suc:%d][bigpropose:%d][other_accept:%d][impossible:%d][other_case:%d]", m.id, m.instanceid, cntsuc, cnt2, cnt3, cnt4, cntimpossible)
 }
 
 //异步发起进行重试
@@ -284,17 +300,16 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		return
 	}
 
-	m.lk.Lock()
 	defer func() {
-		m.lk.Unlock()
 		if res == 0 {
-			//只有正常了才能回传信息
+			//只有正常了才能回传信息，顺便清空下数值
+			r.ClearStackMsg("")
 			m.reportmsg <- r.InstanceId
 		}
 	}()
 
 	//索引对应的seq
-	value, ok := m.mpLocPropose[r.InstanceId]
+	rawValue, ok := m.mpLocPropose.Load(r.InstanceId)
 	if !ok {
 		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接创建并保存这个结果
 		fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v ", m.id, r.InstanceId, result, r)
@@ -302,6 +317,7 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		//直接返回这个值，通过后边自身的学习去感知这个值
 		return
 	}
+	value := rawValue.(*AckState)
 	if value.seq != r.Vt.Seq {
 		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d ins:%+v result:%d msg:%+v ", m.id, value, result, r))
 	}
@@ -359,11 +375,6 @@ func (m *PaNode) Step(t *PaCommnMsg, bLock bool) {
 		} else {
 			break
 		}
-	}
-
-	if bLock {
-		m.veclk[int(t.GetSeqID())%len(m.veclk)].Lock()
-		defer m.veclk[int(t.GetSeqID())%len(m.veclk)].Unlock()
 	}
 
 	r := m.GetSeqMsg(t.GetSeqID())

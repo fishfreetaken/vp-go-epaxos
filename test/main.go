@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/pprof"
-	"sync"
 	"time"
 	paxoscommm "vp-go-epaxos/paxosCommm"
 )
@@ -24,9 +23,8 @@ func SetupPProf() {
 
 func main() {
 	go SetupPProf()
-	seqNum := 800000
+	seqNum := 400000
 	nodenumber := 11
-
 	/*
 		f, _ := os.Create("myTrace.dat")
 		defer f.Close()
@@ -36,42 +34,19 @@ func main() {
 	//GoTest(nodenumber, seqNum)
 	var gClose = make(chan int)
 
-	gt := time.NewTicker(time.Second * 60)
+	gt := time.NewTicker(time.Second * 120)
 	//return
 	go func() {
 		var g paxoscommm.PaGroup
 		g.Init(nodenumber)
 
-		var wg sync.WaitGroup
 		for i := 0; i < seqNum; i++ {
-			wg.Add(5)
-			go func() {
-				g.Index(5).NewProPoseMsg(nil, 0)
-				wg.Done()
-			}()
-			go func() {
-				g.Index(8).NewProPoseMsg(nil, 0)
-				wg.Done()
-			}()
-
-			go func() {
-				g.Index(2).NewProPoseMsg(nil, 0)
-				wg.Done()
-			}()
-
-			go func() {
-				g.Index(9).NewProPoseMsg(nil, 0)
-				wg.Done()
-			}()
-
-			go func() {
-				g.Index(1).NewProPoseMsg(nil, 0)
-				wg.Done()
-			}()
-
+			g.Index(5).BeginNewCommit(&paxoscommm.ClientReq{})
+			g.Index(8).BeginNewCommit(&paxoscommm.ClientReq{})
+			g.Index(2).BeginNewCommit(&paxoscommm.ClientReq{})
+			g.Index(9).BeginNewCommit(&paxoscommm.ClientReq{})
+			g.Index(1).BeginNewCommit(&paxoscommm.ClientReq{})
 		}
-		fmt.Printf("wait 0 \n")
-		wg.Wait()
 		fmt.Printf("wait 1 \n")
 		g.WaitForNode()
 		fmt.Printf("wait 2 \n")
@@ -80,6 +55,7 @@ func main() {
 		//每一个seq值都需要check一下最后的结果
 
 		g.ResultCheck()
+		fmt.Printf("wait 3 \n")
 		gClose <- 1
 	}()
 

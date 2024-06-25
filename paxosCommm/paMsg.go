@@ -170,8 +170,8 @@ func (m *VoteInfo) SetCommit(t *VoteInfo) bool {
 }
 
 type ClientReq struct {
-	Seq  int //事务版本  如果有了需要查询这个事务是否完成
-	Body interface{}
+	Instanceid int64 //事务版本  如果有了需要查询这个事务是否完成
+	Body       interface{}
 }
 
 type ClientRsp struct {
@@ -213,6 +213,24 @@ func (m *PaCommnMsg) SetFrom(id int, flowtype int32) {
 //接受一个提议
 func (m *PaCommnMsg) Propose(t *PaCommnMsg) {
 	m.Vt.SetPropose(&t.Vt)
+}
+
+const (
+	PACOMM_MSG_CLEAR_PROPOSE = "propose"
+	PACOMM_MSG_CLEAR_ACCEPT  = "accept"
+)
+
+func (m *PaCommnMsg) ClearStackMsg(clearyType string) {
+	switch clearyType {
+	case PACOMM_MSG_CLEAR_PROPOSE:
+		m.ProposeList = m.ProposeList[:0]
+	case PACOMM_MSG_CLEAR_ACCEPT:
+		m.AcceptList = m.AcceptList[:0]
+	default:
+		//两个都清理了
+		m.ProposeList = m.ProposeList[:0]
+		m.AcceptList = m.AcceptList[:0]
+	}
 }
 
 func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, retry bool) {

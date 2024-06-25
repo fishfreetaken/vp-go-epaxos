@@ -136,17 +136,6 @@ func (m *PaGroup) InformVoteResult(t VoteInfo) {
 	m.recvseq <- t
 }
 
-func (m *PaGroup) BeginOneReq(idx int, req *ClientReq, wg *sync.WaitGroup) {
-	if idx >= len(m.list) {
-		panic(fmt.Sprintf("%d_%d", idx, len(m.list)))
-	}
-	wg.Add(1)
-	go func() {
-		m.list[idx].NewProPoseMsg(req, 0)
-		wg.Done()
-	}()
-}
-
 //总的master来统计各个提交的数据是否有冲突
 func (m *PaGroup) AsyncWaitResult() {
 	for v := range m.recvseq {
@@ -171,7 +160,6 @@ func (m *PaGroup) AsyncWaitResult() {
 
 func (m *PaGroup) WaitForNode() {
 	//这里应该已经没有新的任务来提交了
-
 	var wg sync.WaitGroup
 	for _, v := range m.list {
 		v.AsyncWork(&wg)
@@ -189,7 +177,7 @@ func (m *PaGroup) Init(membernum int) {
 		})
 		m.list[i].SetVecLkNums(m, membernum)
 	}
-	m.recvseq = make(chan VoteInfo, 2000)
+	m.recvseq = make(chan VoteInfo, 1500)
 	m.mpResult = make(map[int64]int)
 
 	//异步统计所有的结果的通知
