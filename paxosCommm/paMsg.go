@@ -171,6 +171,7 @@ func (m *VoteInfo) SetCommit(t *VoteInfo) bool {
 
 type ClientReq struct {
 	Instanceid int64 //事务版本  如果有了需要查询这个事务是否完成
+	Step       int32
 	Body       interface{}
 }
 
@@ -231,6 +232,8 @@ func (m *PaCommnMsg) ClearStackMsg(clearyType string) {
 		m.ProposeList = m.ProposeList[:0]
 		m.AcceptList = m.AcceptList[:0]
 	}
+	//释放req的请求，节省内存
+	m.Body = nil
 }
 
 func (m *PaCommnMsg) ProposeAck(t *PaCommnMsg, membersNum, nodeid int) (accept, retry bool) {

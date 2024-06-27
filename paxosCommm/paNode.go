@@ -20,8 +20,6 @@ type PaNode struct {
 	// sync map还是防止并发
 	mpLocPropose sync.Map //map[int64]*AckState
 
-	reportmsg chan int64
-
 	vecChans []chan PaCommnMsg
 
 	msgChannel chan *ClientReq
@@ -30,13 +28,28 @@ type PaNode struct {
 	instanceid int64
 	//seqmap     map[int64]int64 //我要知道哪些是我自己的提出来的 ,key to instanceid
 
+	incresultcnt int64
 	//当前的
 	curseq int64
 	g      *PaGroup
+
+	curmsgstate *ClientReq
+}
+
+func (m *PaNode) GetCurMsgState() ClientReq {
+
+	/*
+		for idx, v := range m.vecChans {
+			if len(v) == 0 || len(v) == cap(v) {
+				fmt.Printf("nodeid:%d idx:%d null channel v:%d\n", m.id, idx, len(v))
+			}
+		}*/
+	return *m.curmsgstate
 }
 
 func (m *PaNode) BeginNewCommit(r *ClientReq) {
 	r.Instanceid = atomic.AddInt64(&m.instanceid, 1)
+	r.Step = -1
 	m.msgChannel <- r
 }
 
@@ -70,13 +83,12 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum int) {
 
 	//m.seqmap = make(map[int64]int64)
 	m.g = g
-	m.reportmsg = make(chan int64, membernum*20)
 
 }
 
 func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 	//获取当前进度的seqid
-
+	m.curmsgstate = req
 	iCurInstanceId := req.Instanceid
 	if iCurInstanceId == 0 {
 		panic(fmt.Sprintf("nodeid:%d zero cur instanceid", m.id))
@@ -100,6 +112,7 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 			},
 			Body: req,
 		}
+		req.Step = 2
 		_, load := m.dict.LoadOrStore(iCurSeq, &cm)
 		if !load {
 			//fmt.Printf("nodeid:%d begin goto seq:%d to proposeid:%d cm:%+v cm:%p\n", m.id, iCurSeq, proposeid, cm, &cm)
@@ -107,6 +120,7 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 			if atomic.LoadInt32(&(cm.Vt.ProposeId)) <= proposeid {
 				//这个值已经被别的抢占小了，重新发起
 				cm.InstanceId = iCurInstanceId
+				req.Step = 3
 				//cmmsg = &cm
 				//fmt.Printf("nodeid:%d has load this seq:%d newCurSeq:%d value:%+v\n", m.id, iCurSeq, atomic.LoadInt64(&m.curseq), cm)
 				break
@@ -114,6 +128,7 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 		}
 		//这个值已经存在了，重新再找一个点
 	}
+
 	res := &PaCommnMsg{
 		Vt: VoteInfo{
 			ProposeId:   proposeid,
@@ -123,10 +138,10 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 		},
 		Body: req,
 	}
-
 	//fmt.Printf("[debug]NewProPoseMsg succnode:%d instid:%d seq:%d  cmmsg:%+v\n", m.id, iCurInstanceId, iCurSeq, cmmsg)
 
 	//本地先注册
+	req.Step = 4
 	//fmt.Printf("before nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	m.mpLocPropose.Store(iCurInstanceId, &AckState{
 		//t:   time.Now(),
@@ -135,8 +150,10 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) *PaCommnMsg {
 
 	//fmt.Printf("mid nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
 	//不需要等待
+	req.Step = 5
 	m.g.Broadcastexcept(*res, m.id)
 	//fmt.Printf("after nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
+	req.Step = 6
 	return res
 }
 
@@ -180,27 +197,30 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	//设置一个15秒的超时时间
 	t := time.NewTicker(time.Second * 60)
 
-	var recvCnt int64
+	tsub := time.NewTicker(time.Millisecond * 1000)
+
 	defer func() {
 		fmt.Printf("node id:%d has done\n", m.id)
 		wg.Done()
 		t.Stop()
+		tsub.Stop()
 	}()
 	//本地如果没有提交的值可以不用等待
 	for {
 		select {
-		case v := <-m.reportmsg:
-			recvCnt++
+		//改成间隔一小段时间来轮训了
+		case <-tsub.C:
 			//都1️以最终的衡量
 			bAllPass := true
 			func() {
 				istancenum := atomic.LoadInt64(&m.instanceid)
+				recvCnt := atomic.LoadInt64(&m.incresultcnt)
 				if recvCnt < istancenum {
 					//避免全量轮训耗时增加
 					bAllPass = false
 					return
 				} else if recvCnt > istancenum {
-					panic(fmt.Sprintf("recvCnt:%d mp:%d v:%+v", recvCnt, istancenum, v))
+					panic(fmt.Sprintf("recvCnt:%d mp:%d", recvCnt, istancenum))
 				}
 				m.mpLocPropose.Range(func(key, value interface{}) bool {
 					st := value.(*AckState)
@@ -217,7 +237,7 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 				})
 			}()
 			if bAllPass {
-				fmt.Printf("AsyncReportAndRetry suc new all pass id:%d retry insid:%+v\n", m.id, v)
+				fmt.Printf("AsyncReportAndRetry suc new all pass id:%d retry \n", m.id)
 				return
 			}
 		case <-t.C:
@@ -304,17 +324,16 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		if res == 0 {
 			//只有正常了才能回传信息，顺便清空下数值
 			r.ClearStackMsg("")
-			m.reportmsg <- r.InstanceId
+			atomic.AddInt64(&m.incresultcnt, 1)
 		}
 	}()
 
 	//索引对应的seq
 	rawValue, ok := m.mpLocPropose.Load(r.InstanceId)
 	if !ok {
-		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接创建并保存这个结果
-		fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v ", m.id, r.InstanceId, result, r)
+		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接返回这个值，通过后边自身的学习去感知这个值
+		//fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v \n", m.id, r.InstanceId, result, r)
 		res = -1
-		//直接返回这个值，通过后边自身的学习去感知这个值
 		return
 	}
 	value := rawValue.(*AckState)
@@ -358,11 +377,11 @@ func (m *PaNode) Step2(idx int) {
 	for msg := range m.vecChans[idx] {
 		//fmt.Printf("step2 id:%d idx:%d msg:%+v", m.id, idx, msg)
 		//这里区分渠道进行处理，减少go的产生
-		m.Step(&msg, false)
+		m.Step(&msg)
 	}
 }
 
-func (m *PaNode) Step(t *PaCommnMsg, bLock bool) {
+func (m *PaNode) Step(t *PaCommnMsg) {
 	//fmt.Printf("step except i:%d from:%d seq:%d flowtye:%d\n  ", m.id, t.Vt.FromId, t.GetSeqID(), t.Flowtype)
 	//每次要更新最大的seq值
 	for {
@@ -394,7 +413,7 @@ func (m *PaNode) Step(t *PaCommnMsg, bLock bool) {
 	case PAXOS_MSG_COMMIT:
 		m.Commit(t, r)
 	default:
-		fmt.Printf("nodeid:%d invalid flow type t:%+v m:%+v", m.id, t, r)
+		panic(fmt.Sprintf("nodeid:%d invalid flow type t:%+v m:%+v", m.id, t, r))
 	}
 }
 
@@ -584,7 +603,7 @@ func (m *PaNode) GetId() int {
 }
 
 func (m *PaNode) Recv(t PaCommnMsg) {
-	go m.Step(&t, true)
+	go m.Step(&t)
 }
 
 func (m *PaNode) Recv2(t PaCommnMsg) {
