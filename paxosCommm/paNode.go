@@ -50,6 +50,7 @@ func (m *PaNode) GetCurMsgState() ClientReq {
 func (m *PaNode) BeginNewCommit(r *ClientReq) {
 	r.Instanceid = atomic.AddInt64(&m.instanceid, 1)
 	r.Step = -1
+	r.RetryTimes = 3
 	m.msgChannel <- r
 }
 
@@ -197,7 +198,7 @@ func (m *PaNode) AsyncReportAndRetry(wg *sync.WaitGroup) {
 	//设置一个15秒的超时时间
 	t := time.NewTicker(time.Second * 60)
 
-	tsub := time.NewTicker(time.Millisecond * 1000)
+	tsub := time.NewTicker(time.Second)
 
 	defer func() {
 		fmt.Printf("node id:%d has done\n", m.id)
@@ -305,6 +306,8 @@ func (m *PaNode) CalcLastReport() string {
 	return fmt.Sprintf("CalcLastReport [nodeid:%d][total:%d][suc:%d][bigpropose:%d][other_accept:%d][impossible:%d][other_case:%d]", m.id, m.instanceid, cntsuc, cnt2, cnt3, cnt4, cntimpossible)
 }
 
+//这里就是根据node来进行执行
+
 //异步发起进行重试
 func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 	//check
@@ -352,6 +355,7 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		if r.Vt.AcceptVote != m.id {
 			panic(fmt.Sprintf("node:%d instacnid:%d invalid msg:%+v", m.id, r.InstanceId, r))
 		}
+		//成功了就需要通知下游按照seq的顺序来执行了
 	} else {
 		if r.Vt.IsCommit() {
 			if r.Vt.CommitVote == m.id {
@@ -367,7 +371,13 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 
 		//fmt.Printf("ResultReport need retry id:%d seqid:%d instanc:%d resultCode:%d  msg:%+v\n", m.id, r.Vt.Seq, iCurInstance, result, r)
 		//如果失败了就要发起重试
-		//这里需要异步的重试
+		//这里需要异步的重试 warning
+		if r.Body.(*ClientReq).RetryTimes <= 0 {
+			fmt.Printf("[Warning][nodeid:%d][instanceid:%d]has exceed retrytimes ", m.id, r.InstanceId)
+		} else {
+			r.Body.(*ClientReq).RetryTimes--
+			m.BeginNewCommit(r.Body.(*ClientReq))
+		}
 	}
 
 	return 0

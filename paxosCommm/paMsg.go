@@ -172,6 +172,7 @@ func (m *VoteInfo) SetCommit(t *VoteInfo) bool {
 type ClientReq struct {
 	Instanceid int64 //事务版本  如果有了需要查询这个事务是否完成
 	Step       int32
+	RetryTimes uint32 //只能进行有限次数的重试吧，不能一直重试
 	Body       interface{}
 }
 
