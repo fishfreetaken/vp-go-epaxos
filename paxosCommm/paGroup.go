@@ -2,6 +2,7 @@ package paxoscommm
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -12,8 +13,8 @@ type PaGroup struct {
 	list []*PaNode
 
 	//通道用来接受结果
-	recvseq  chan VoteInfo
-	mpResult map[int64]int //seq -> nodeid
+	recvseq  chan *SwapMsgVoteInfo
+	mpResult map[uint64]uint32 //seq -> nodeid
 
 	begin time.Time
 
@@ -22,41 +23,42 @@ type PaGroup struct {
 	invalid     int
 }
 
-func (m *PaGroup) Sendto(idx int, st PaCommnMsg) {
-	//m.list[idx].Recv(st)
-	m.list[idx].Recv2(st)
+func (m *PaGroup) Sendto(idx uint32, st *SwapMsgVoteInfo) {
+	m.list[idx].Recv2(*st)
 }
 
 func (m *PaGroup) Index(idx int) *PaNode {
 	return m.list[idx]
 }
 
-func (m *PaGroup) Broadcast(st *PaCommnMsg) {
-	m.Broadcastexcept(*st, -1)
-}
-
-func (m *PaGroup) Broadcastexcept(st PaCommnMsg, index int) {
+func (m *PaGroup) Broadcast(st *SwapMsgVoteInfo) {
 	for i := range m.list {
-		if i == index {
-			continue
-		}
-		m.Sendto(i, st)
+		m.Sendto(uint32(i), st)
 	}
 }
 
-func (m *PaGroup) ResultCheck() int64 {
-	var totalSeq int64
+func (m *PaGroup) Broadcastexcept(st *SwapMsgVoteInfo) {
+	for i := range m.list {
+		if i == int(st.GetFromID()) {
+			continue
+		}
+		m.Sendto(uint32(i), st)
+	}
+}
+
+func (m *PaGroup) ResultCheck() uint64 {
+	var totalSeq uint64
 	var ttcnt int
 	var proposesum int
 	for _, v := range m.list {
 		fmt.Printf("%s\n", v.CalcLastReport())
-		if atomic.LoadInt64(&v.curseq) > totalSeq {
-			totalSeq = atomic.LoadInt64(&v.curseq)
+		if atomic.LoadUint64(&v.curseq) > totalSeq {
+			totalSeq = atomic.LoadUint64(&v.curseq)
 		}
 		proposesum += int(v.instanceid)
 	}
 
-	for i := int64(1); i <= totalSeq; i++ {
+	for i := uint64(1); i <= totalSeq; i++ {
 		m.Report(i)
 	}
 
@@ -65,19 +67,19 @@ func (m *PaGroup) ResultCheck() int64 {
 }
 
 //获取到最大的seqid，就要一个一个的check结果
-func (m *PaGroup) Report(seq int64) {
-	var rc = make(map[int][]int)
+func (m *PaGroup) Report(seq uint64) {
+	var rc = make(map[uint32][]uint32)
 	for _, v := range m.list {
 		tsp := v.GetSeqMsg(seq)
-		if !tsp.IsAccept() || tsp.Vt.IsFailed() {
+		if !tsp.State.HasAccept() || tsp.State.IsFailed() {
 			//没有accept就不需要统计了
 			fmt.Printf("[ERROR]Laset report seq:%d  nodeid:%d not accept:%+v\n", seq, v.GetId(), tsp)
 			continue
 		}
-		rc[tsp.Vt.AcceptVote] = append(rc[tsp.Vt.AcceptVote], v.GetId())
+		rc[tsp.State.GetVote()] = append(rc[tsp.State.GetVote()], v.GetId())
 	}
 
-	masterIdx := -1
+	masterIdx := uint32(math.MaxUint32)
 	validnum := len(m.list)>>1 + 1
 	for key, v := range rc {
 		if key == 0 {
@@ -90,7 +92,7 @@ func (m *PaGroup) Report(seq int64) {
 			}())
 		}
 		if len(v) >= validnum {
-			if masterIdx != -1 {
+			if masterIdx != math.MaxUint32 {
 				panic("invalid master index")
 			}
 			masterIdx = key
@@ -108,17 +110,17 @@ func (m *PaGroup) Report(seq int64) {
 		}
 	}
 
-	tmplocalgp := -1
+	tmplocalgp := uint32(math.MaxUint32)
 	if v, ok := m.mpResult[seq]; ok {
 		tmplocalgp = v
 	}
-	if tmplocalgp == masterIdx && masterIdx != -1 {
+	if tmplocalgp == masterIdx && masterIdx != math.MaxUint32 {
 		m.decidenum++
 		//fmt.Printf("Last Report seq:%d decideid:%d\n", seq, masterIdx)
 		return
 	} else if tmplocalgp != masterIdx {
 		m.invalid++
-		if masterIdx == -1 {
+		if masterIdx == math.MaxUint32 {
 			fmt.Printf("1 node not equal seq:%d localresult:%d masteridx:%d \n", seq, tmplocalgp, masterIdx)
 		} else {
 			fmt.Printf("2 node not equal seq:%d localresult:%d masteridx:%d msg:%+v\n", seq, tmplocalgp, masterIdx, m.list[masterIdx].GetSeqMsg(seq))
@@ -131,7 +133,7 @@ func (m *PaGroup) Report(seq int64) {
 	fmt.Printf("\n")
 }
 
-func (m *PaGroup) InformVoteResult(t VoteInfo) {
+func (m *PaGroup) InformVoteResult(t *SwapMsgVoteInfo) {
 	//看所有的seq都已经计算过了
 	m.recvseq <- t
 }
@@ -141,19 +143,19 @@ func (m *PaGroup) AsyncWaitResult() {
 	for v := range m.recvseq {
 		//fmt.Printf("AsyncWaitResult seq:%d acceptinfo:%+v\n", v.Seq, v)
 		if hasMasterid, ok := m.mpResult[v.Seq]; ok {
-			if hasMasterid != v.CommitVote {
+			if hasMasterid != v.State.GetVote() {
 				panic(func() string {
 					sa := fmt.Sprintf("seq:%d hasmaster:%d masterid:%+v \n", v.Seq, hasMasterid, v)
-					if hasMasterid != -1 {
+					if hasMasterid != math.MaxUint32 {
 						sa += fmt.Sprintf("hasMasterid :%d %+v\n", hasMasterid, m.list[hasMasterid].GetSeqMsg(v.Seq))
 					}
-					sa += fmt.Sprintf("fromid :%d %+v\n", v.CommitVote, m.list[v.FromId].GetSeqMsg(v.Seq))
+					sa += fmt.Sprintf("fromid :%d %+v\n", v.State.GetVote(), m.list[v.GetFromID()].GetSeqMsg(v.Seq))
 					return sa
 				}())
 				//panic(fmt.Sprintf("seq:%d hasmaster:%d masterid:%+v :\n %+v \n%+v", v.Seq, hasMasterid, v, m.list[hasMasterid].GetSeqMsg(v.Seq), m.list[v.AcceptVote].GetSeqMsg(v.Seq)))
 			}
 		} else {
-			m.mpResult[v.Seq] = v.CommitVote
+			m.mpResult[v.Seq] = v.State.GetVote()
 		}
 	}
 }
@@ -167,18 +169,18 @@ func (m *PaGroup) WaitForNode() {
 	wg.Wait()
 }
 
-func (m *PaGroup) Init(membernum int) {
+func (m *PaGroup) Init(membernum uint32) {
 	rand.New(rand.NewSource(time.Now().Unix()))
 	m.begin = time.Now()
-	for i := 0; i < membernum; i++ {
+	for i := uint32(0); i < membernum; i++ {
 		m.list = append(m.list, &PaNode{
 			id:       i,
 			priority: i,
 		})
 		m.list[i].SetVecLkNums(m, membernum)
 	}
-	m.recvseq = make(chan VoteInfo, 1500)
-	m.mpResult = make(map[int64]int)
+	m.recvseq = make(chan *SwapMsgVoteInfo, 1500)
+	m.mpResult = make(map[uint64]uint32)
 
 	//异步统计所有的结果的通知
 	go m.AsyncWaitResult()
@@ -188,6 +190,6 @@ func (m *PaGroup) RandNodeIndex() int {
 	return int(rand.Int31()) % len(m.list)
 }
 
-func (m *PaGroup) GetNumber() int {
-	return len(m.list)
+func (m *PaGroup) GetNumber() uint32 {
+	return uint32(len(m.list))
 }
