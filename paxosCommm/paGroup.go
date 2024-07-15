@@ -32,17 +32,17 @@ func (m *PaGroup) Index(idx int) *PaNode {
 }
 
 func (m *PaGroup) Broadcast(st *SwapMsgVoteInfo) {
-	for i := range m.list {
-		m.Sendto(uint32(i), st)
+	for _, v := range m.list {
+		m.Sendto(v.GetId(), st)
 	}
 }
 
 func (m *PaGroup) Broadcastexcept(st *SwapMsgVoteInfo) {
-	for i := range m.list {
+	for i, v := range m.list {
 		if i == int(st.GetFromID()) {
 			continue
 		}
-		m.Sendto(uint32(i), st)
+		m.Sendto(v.GetId(), st)
 	}
 }
 
