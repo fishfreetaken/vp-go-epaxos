@@ -126,7 +126,7 @@ func (m *PaGroup) Report(seq uint64) {
 			fmt.Printf("2 node not equal seq:%d localresult:%d masteridx:%d msg:%+v\n", seq, tmplocalgp, masterIdx, m.list[masterIdx].GetSeqMsg(seq))
 		}
 	} else {
-		fmt.Printf("seq:%d not desicde \n", seq)
+		fmt.Printf("seq:%d not descide \n", seq)
 		m.nodecidenum++
 	}
 	printRc()

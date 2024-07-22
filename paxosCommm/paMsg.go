@@ -117,7 +117,7 @@ func (m *PaxosState) StepFailed() bool {
 		return false
 	}
 
-	m.printStack()
+	//m.printStack()
 	m.State = PAXOS_MSG_HAS_FAILED
 	m.Vote = math.MaxUint32
 	return true
@@ -129,6 +129,7 @@ func (m *PaxosState) IsBehind(p *PaxosState) bool {
 }
 
 func (m *PaxosState) Check(t *PaxosState) bool {
+
 	if t.IsPropose() && m.IsPropose() && m.ProposeId == t.ProposeId && t.Vote != m.Vote {
 		return false
 	}
@@ -203,18 +204,22 @@ func (m *ProposeInfo) IncFail() {
 	m.failCnt++
 }
 
+func isPaxosFail(failcnt, membernum uint32) bool {
+	return failcnt >= ((membernum >> 1) + (membernum % 2))
+}
+
 func (m *ProposeInfo) Judge(st *PaxosState, membernum uint32) {
 	if st.HasAccept() {
 		panic(fmt.Sprintf("st:%+v has accept proposinfo:%+v", st, m))
 	}
 	passNum := membernum >> 1
 
-	if m.failCnt >= (membernum >> 1) {
-		fmt.Printf("[Warning]ProposeInfo judge id:%d member:%d faile:%d suc:%d has impossbile", st.GetVote(), membernum, m.failCnt, m.sucCnt)
+	if isPaxosFail(m.failCnt, membernum) {
 		st.StepAcceptFailed()
+		fmt.Printf("[Warning]ProposeInfo judge id:%d member:%d faile:%d suc:%d has impossbile\n", st.GetVote(), membernum, m.failCnt, m.sucCnt)
 		return
 	}
-	if m.sucCnt >= (passNum + 1) {
+	if m.sucCnt >= passNum {
 		st.StepAccept(st.GetVote())
 		return
 	}
@@ -250,19 +255,24 @@ func (m *AcceptInfo) AddAndJudge(s *PaxosState, t *PaxosState, membernum uint32)
 		return
 	}
 
-	if cnt > membernum {
+	if cnt > membernum || uint32(len(m.votelist)) > membernum {
 		panic(fmt.Sprintf("vote:%d invalid member num:%d", s.Vote, cnt))
 	}
 
-	if m.failCnt >= (membernum >> 1) {
+	if isPaxosFail(m.failCnt, membernum) {
 		//至少有一半以上就是失败了，这里没有必要做什么，等别人commit就好了
 		//但是要通知自己已经失败了
 		c = t.StepAcceptFailed()
 		return
 	}
 
+	if uint32(len(m.votelist)) == 0 {
+		return
+	}
+
 	var mpvote = make(map[uint32]uint32) //vote
 	var maxNum uint32
+	mpvote[t.Vote] = 1
 	//这里看选票是否被瓜分了
 	for _, v := range m.votelist {
 		mpvote[v]++
@@ -276,11 +286,13 @@ func (m *AcceptInfo) AddAndJudge(s *PaxosState, t *PaxosState, membernum uint32)
 		}
 	}
 
+	//判断选票是否被瓜分了
 	//如果这里失败达到一定的次数，本次提交失去了地位已经
-	if isImpossible(membernum, cnt, maxNum, passNum) {
+	//这里应该考虑failcnt的数量
+	if isImpossible(membernum, uint32(len(m.votelist))+1, maxNum, passNum) {
 		//选票被瓜分了，谁都胜利不出
 		c = t.StepFailed()
-		fmt.Printf("impossiable accept vote success maxNum:%d membernum:%d cnt:%d \n", maxNum, membernum, cnt)
+		fmt.Printf("impossiable accept vote success maxNum:%d membernum:%d cnt:%d fail:%d len:%d t:%+v s:%+v \n", maxNum, membernum, cnt, m.failCnt, len(m.votelist), t, s)
 		return
 	}
 	return
@@ -340,8 +352,6 @@ func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, membersNum uint32) {
 	} else {
 		if t.State.IsBehind(&m.State) {
 			//老的无效数据不考虑了
-			//step failed 也能节省请求量
-			//在做重试之前，应该不能出现这种情况
 			//特别异常的一个情况，只有冲突的时候才会有这种情况
 			// 我更新了一个最大的proposeid，但是后边又来了一个旧值，所以这种情况还是允许发生的
 			//panic(fmt.Sprintf("smaller proporse than local t:%+v m:%+v\n", t, m))
@@ -353,7 +363,7 @@ func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, membersNum uint32) {
 			//fmt.Printf("bigger proporse than local seq:%d  remote %d:%d_local:%d:%d\n", t.Vt.Seq, t.Vt.FromId, t.Vt.ProposeId, m.Vt.FromId, m.Vt.ProposeId)
 			//先接受这个提议，挡住后边的accept请求,,如果收到醉倒的proposeid的话，一定要更新proposeid
 			//m.Vt.ProposeId = t.Vt.ProposeId
-			fmt.Printf("SetPropose small before nodeid:%d t:%+v m:%+v\n", m.FromId, t, m)
+			//fmt.Printf("SetPropose small before nodeid:%d t:%+v m:%+v\n", m.FromId, t, m)
 			//遇到小的值退出
 			//这里其实是我的proposid小了，要接受你的值
 			m.State.StepToSmallProposeID(&t.State)

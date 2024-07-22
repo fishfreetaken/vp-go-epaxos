@@ -53,7 +53,7 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum uint32) {
 		m.vecChans[i] = make(chan *SwapMsgVoteInfo, channum*80)
 	}
 
-	fmt.Printf("veclock init vecchans len:%d vecchans len:%d  real chan len:%d msgchan len:%d\n", len(m.vecChans), len(m.vecChans), len(m.vecChans[0]), channum*80)
+	//fmt.Printf("veclock init vecchans len:%d vecchans len:%d  real chan len:%d msgchan len:%d\n", len(m.vecChans), len(m.vecChans), len(m.vecChans[0]), channum*80)
 	for i := 0; i < int(channum); i++ {
 		go m.Step2(i)
 	}
@@ -117,7 +117,7 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) {
 	})
 
 	m.g.Broadcastexcept(swapMsg)
-	//fmt.Printf("after nodeid:%d instanceid:%d seqid:%d %d\n", m.id, iCurInstanceId, iCurSeq, m.curseq)
+	fmt.Printf("after nodeid:%d instanceid:%d seqid:%d %d proposeid:%d\n", m.id, iCurInstanceId, iCurSeq, atomic.LoadUint64(&m.curseq), proposeid)
 
 	return
 }
@@ -277,15 +277,18 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 	if !ok {
 		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接返回这个值，通过后边自身的学习去感知这个值
 		//fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v \n", m.id, r.InstanceId, result, r)
-		res = -1
+		res = -2
 		return
 	}
-	value := rawValue.(*AckState)
-	if value.seq != r.Seq {
-		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d ins:%+v result:%d msg:%+v ", m.id, value, result, r))
-	}
-	if value.iCode != 0 {
 
+	value := rawValue.(*AckState)
+
+	if value.seq != r.Seq {
+		//来一条消息，instance的id本身就是独立的
+		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r))
+	}
+
+	if value.iCode != 0 {
 		//fmt.Printf("[warning]ResultReport not equal nodeid:%d instance id :%d valueseq:%d r seq:%d  resultcode:%d res:%d\n", m.id, iCurInstance, value.seq, r.Vt.Seq, value.iCode, result)
 		//insance所对应的seq已经发生变化，不需要进行处理
 		res = -3
@@ -300,7 +303,7 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		m.g.InformVoteResult(r.BuildSwapMsg(PAXOS_MSG_COMMIT))
 		//成功了就需要通知下游按照seq的顺序来执行了
 	} else {
-		if r.State.HasAccept() && r.State.IsVote(m.id) {
+		if (r.State.IsAccept() || r.State.IsCommit()) && r.State.IsVote(m.id) {
 			panic(fmt.Sprintf("node:%d instacnid:%d result:%d  invalid msg:%+v", m.id, iLocalInstancId, result, r))
 		}
 		//fmt.Printf("ResultReport node:%d instacnid:%d result:%d value:%+v invalid msg:%+v\n", m.id, r.InstanceId, result, value, v.(*PaCommnMsg))
@@ -352,7 +355,7 @@ func (m *PaNode) Step(t *SwapMsgVoteInfo) {
 	r := m.GetSeqMsg(t.GetSeqID())
 
 	//基本检查
-	if !r.State.Check(&t.State) {
+	if !r.State.Check(&t.State) || t.Seq != r.Seq {
 		panic(fmt.Sprintf("node:%d m:%+v \n t:%+v\n", m.GetId(), r, t))
 	}
 
@@ -418,9 +421,9 @@ func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 			//选的不是自己的就直接失败了
 			//或者被其他的accept住了
 			m.ResultReport(r, PANODE_RESULT_BIG_PROPOSEID)
-		} else if r.State.HasAccept() {
+		} else if r.State.IsAccept() {
 			go m.g.Broadcastexcept(r.BuildSwapMsg(PAXOS_MSG_ACCEPT))
-		} else {
+		} else if r.State.HasCommit() {
 			panic(fmt.Sprintf("impossible isu:%+v r:%+v", t, r))
 		}
 	}
@@ -429,7 +432,7 @@ func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 func (m *PaNode) Accept(t *SwapMsgVoteInfo, r *PaCommnMsg) (bAck bool) {
 	if !t.State.IsAccept() {
 		//你不应该承受这个消息的
-		panic(fmt.Sprintf("[accept] invalid msg t:%+v r:%+v has commit", t))
+		panic(fmt.Sprintf("[accept] invalid msg t:%+v r:%+v not accept", t, r))
 	}
 
 	if t.State.HasCommit() {
