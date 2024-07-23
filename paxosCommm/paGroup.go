@@ -73,7 +73,7 @@ func (m *PaGroup) Report(seq uint64) {
 		tsp := v.GetSeqMsg(seq)
 		if !tsp.State.HasAccept() || tsp.State.IsFailed() {
 			//没有accept就不需要统计了
-			fmt.Printf("[ERROR]Laset report seq:%d  nodeid:%d not accept:%+v\n", seq, v.GetId(), tsp)
+			//fmt.Printf("[ERROR]Laset report seq:%d  nodeid:%d not accept:%+v\n", seq, v.GetId(), tsp)
 			continue
 		}
 		rc[tsp.State.GetVote()] = append(rc[tsp.State.GetVote()], v.GetId())

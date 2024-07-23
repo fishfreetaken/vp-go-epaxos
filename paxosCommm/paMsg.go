@@ -38,6 +38,10 @@ func (m *PaxosState) IsPropose() bool {
 	return m.State == PAXOS_MSG_BEGIN_PROPOSE
 }
 
+func (m *PaxosState) IsProposeFailed() bool {
+	return m.State == PAXOS_MSG_SMALL_PROPOSEID
+}
+
 func (m *PaxosState) HasAccept() bool {
 	return m.State >= PAXOS_MSG_HAS_ACCEPTED
 }
@@ -71,6 +75,14 @@ func (m *PaxosState) StepAccept(vote uint32) bool {
 	}
 	m.State = PAXOS_MSG_HAS_ACCEPTED
 	m.Vote = vote
+	return true
+}
+
+func (m *PaxosState) StepProposeFailed() bool {
+	if m.HasAccept() {
+		return false
+	}
+	m.State = PAXOS_MSG_SMALL_PROPOSEID
 	return true
 }
 
@@ -215,8 +227,8 @@ func (m *ProposeInfo) Judge(st *PaxosState, membernum uint32) {
 	passNum := membernum >> 1
 
 	if isPaxosFail(m.failCnt, membernum) {
-		st.StepAcceptFailed()
-		fmt.Printf("[Warning]ProposeInfo judge id:%d member:%d faile:%d suc:%d has impossbile\n", st.GetVote(), membernum, m.failCnt, m.sucCnt)
+		st.StepProposeFailed()
+		//fmt.Printf("[Warning]ProposeInfo judge id:%d member:%d faile:%d suc:%d has impossbile\n", st.GetVote(), membernum, m.failCnt, m.sucCnt)
 		return
 	}
 	if m.sucCnt >= passNum {

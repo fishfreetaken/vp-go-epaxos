@@ -95,18 +95,22 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) {
 			},
 			Seq:    iCurSeq,
 			FromId: m.id,
-			Body:   *req,
+			//Body:   *req, //【Trace】这里赋值会匹配不上对应的seqid，有bug
 		}
 		_, load := m.dict.LoadOrStore(iCurSeq, cm)
 		if !load {
+			//获取当前的一个snapshot，如果需要落盘的话，这里会可能不存在
+			swapMsg = cm.BuildSwapMsg(PAXOS_MSG_BEGIN_PROPOSE)
 			//fmt.Printf("nodeid:%d begin goto seq:%d to proposeid:%d cm:%+v cm:%p\n", m.id, iCurSeq, proposeid, cm, &cm)
 			//这里中间可能会发生改变，这个seq值被其他人占用
-			if atomic.LoadUint32(&(cm.State.ProposeId)) <= proposeid {
-				//这个值已经被别的抢占小了，重新发起
-				swapMsg = cm.BuildSwapMsg(PAXOS_MSG_BEGIN_PROPOSE)
-				//fmt.Printf("nodeid:%d has load this seq:%d newCurSeq:%d value:%+v\n", m.id, iCurSeq, atomic.LoadInt64(&m.curseq), cm)
+			if swapMsg.State.ProposeId <= proposeid && swapMsg.State.IsPropose() {
+				//success
+				cm.Body = *req
+				//fmt.Printf("after nodeid:%d instanceid:%d Seq:%d proposeid:%d swapMsg:%+v cm:%+v\n", m.id, iCurInstanceId, iCurSeq, proposeid, swapMsg, cm)
 				break
 			}
+			//fmt.Printf("[Trace]after nodeid:%d instanceid:%d Seq:%d proposeid:%d swapMsg:%+v cm:%+v\n", m.id, iCurInstanceId, iCurSeq, proposeid, swapMsg, cm)
+			//这个值已经被别的抢占小了，重新发起
 		}
 		//这个值已经存在了，重新再找一个点
 	}
@@ -117,8 +121,6 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) {
 	})
 
 	m.g.Broadcastexcept(swapMsg)
-	fmt.Printf("after nodeid:%d instanceid:%d seqid:%d %d proposeid:%d\n", m.id, iCurInstanceId, iCurSeq, atomic.LoadUint64(&m.curseq), proposeid)
-
 	return
 }
 
@@ -263,13 +265,13 @@ func (m *PaNode) CalcLastReport() string {
 }
 
 //异步发起进行重试
-func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
+func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (int32, string) {
 	//check
 	iLocalInstancId := r.Body.Instanceid
 	if iLocalInstancId == 0 {
 		//本地没有注册这个值
-		res = -1
-		return
+
+		return -1, "-1"
 	}
 
 	//索引对应的seq
@@ -277,22 +279,21 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 	if !ok {
 		//有可能是这种情况，我还没有来得及注册，已经通知到我了，直接返回这个值，通过后边自身的学习去感知这个值
 		//fmt.Printf("[Warning]ResultReport not exist node:%d ins:%d result:%d msg:%+v \n", m.id, r.InstanceId, result, r)
-		res = -2
-		return
+		return -2, "-2"
 	}
 
 	value := rawValue.(*AckState)
-
 	if value.seq != r.Seq {
 		//来一条消息，instance的id本身就是独立的
-		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r))
+
+		//panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r))
+		return -1000001, fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r)
 	}
 
 	if value.iCode != 0 {
 		//fmt.Printf("[warning]ResultReport not equal nodeid:%d instance id :%d valueseq:%d r seq:%d  resultcode:%d res:%d\n", m.id, iCurInstance, value.seq, r.Vt.Seq, value.iCode, result)
 		//insance所对应的seq已经发生变化，不需要进行处理
-		res = -3
-		return
+		return -3, "-3"
 	}
 	value.iCode = result
 
@@ -327,7 +328,7 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (res int32) {
 		//m.commitMsgCommit <- r.GetSeqID()
 	}
 
-	return 0
+	return 0, ""
 }
 
 func (m *PaNode) Step2(idx int) {
@@ -377,27 +378,31 @@ func (m *PaNode) Step(t *SwapMsgVoteInfo) {
 	default:
 		panic(fmt.Sprintf("nodeid:%d invalid flow type t:%+v m:%+v", m.id, t, r))
 	}
+	if r.Seq != t.Seq {
+		panic(fmt.Sprintf("node:%d m:%+v \n t:%+v\n", m.GetId(), r, t))
+	}
 }
 
 //传指针
 func (m *PaNode) Propose(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 	//提议阶段InForm
 	//做一件很简单的事情，比较proposeid，拷贝赋值
+
 	r.Propose(t)
 	//这个肯定是要ack的
 	//能减少copy新的就用老的就好了吧
 }
 
 func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
-	/*
-		if r.State.HasCommit() {
-			//分析一下这里不能的根本原因
-			//补充一个，如果自己预先已经commit了，将这个结果补充进去(千万不要以为自己想通了就删掉,之前删除过一次，遇到阻塞又加回来了)
-			//这里已经commit了，为什么不在commit的地方进行通知呢
-			m.ResultReport(r, PANODE_RESULT_COMMIT)
-			return
-		}
-	*/
+
+	if r.State.HasCommit() {
+		//提交的时候是乱序的，这里有可能当时找不到对应的seq，后边有人帮忙commit了，后边就丢弃这里的值了
+		//补充一个，如果自己预先已经commit了，将这个结果补充进去(千万不要以为自己想通了就删掉,之前删除过一次，遇到阻塞又加回来了)
+		//这里已经commit了，为什么不在commit的地方进行通知呢
+		m.ResultReport(r, PANODE_RESULT_COMMIT)
+		return
+	}
+
 	if !r.State.IsPropose() || !r.State.IsVote(m.id) {
 		//状态已经发生变化了，没有必要接受后边的请求
 		//我已经accept了，没有意义接受这个阶段
@@ -417,11 +422,14 @@ func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 	//正常的提交流程
 	r.ProposeAck(t, m.g.GetNumber())
 	if !r.State.IsPropose() {
-		if !r.State.IsVote(m.id) {
+		if !r.State.IsVote(m.id) || r.State.IsProposeFailed() {
 			//选的不是自己的就直接失败了
 			//或者被其他的accept住了
 			m.ResultReport(r, PANODE_RESULT_BIG_PROPOSEID)
 		} else if r.State.IsAccept() {
+			if !r.State.IsVote(m.id) {
+				panic(fmt.Sprintf("id:%d r:%+v t:%+v", m.id, r, t))
+			}
 			go m.g.Broadcastexcept(r.BuildSwapMsg(PAXOS_MSG_ACCEPT))
 		} else if r.State.HasCommit() {
 			panic(fmt.Sprintf("impossible isu:%+v r:%+v", t, r))
@@ -504,11 +512,16 @@ func (m *PaNode) Recv2(t SwapMsgVoteInfo) {
 
 func (m *PaNode) Commit(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 	if r.Commit(t) {
+		var iRet int32
+		var strR string
 		//不管谁都通知一下吧
 		if r.State.IsCommit() && r.State.IsVote(m.id) {
-			m.ResultReport(r, PANODE_RESULT_SUC)
+			iRet, strR = m.ResultReport(r, PANODE_RESULT_SUC)
 		} else {
-			m.ResultReport(r, PANODE_RESULT_COMMIT)
+			iRet, strR = m.ResultReport(r, PANODE_RESULT_COMMIT)
+		}
+		if iRet == -1000001 {
+			panic(fmt.Sprintf("nodid:%d t:%+v r:%+v\n rs:%s", m.id, t, r, strR))
 		}
 	}
 }

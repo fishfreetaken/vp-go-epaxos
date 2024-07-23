@@ -22,10 +22,16 @@ func SetupPProf() {
 	}
 }
 
+func NewClientReq() *paxoscommm.ClientReq {
+	return &paxoscommm.ClientReq{
+		RetryTimes: 3,
+	}
+}
+
 func main() {
 	go SetupPProf()
-	seqNum := 1000000
-	nodenumber := 11
+	seqNum := 500000
+	nodenumber := uint32(11)
 	/*
 		f, _ := os.Create("myTrace.dat")
 		defer f.Close()
@@ -35,7 +41,7 @@ func main() {
 	//GoTest(nodenumber, seqNum)
 	var gClose = make(chan int)
 
-	gt := time.NewTicker(time.Second * 90)
+	gt := time.NewTicker(time.Second * 300)
 
 	var vctlist = make([]*paxoscommm.ClientReq, nodenumber)
 	var gSeqNum int32
@@ -45,30 +51,18 @@ func main() {
 	go func() {
 		g.Init(nodenumber)
 		for i := 0; i < seqNum; i++ {
-			if atomic.LoadInt32(&chKillTerminal) > 0 {
+			if chKillTerminal > 0 {
 				fmt.Printf("Terminal i:%d\n", i)
 				atomic.AddInt32(&chKillTerminal, 1)
 				return
 			}
 			gSeqNum = int32(i)
-			v5 := &paxoscommm.ClientReq{}
-			v8 := &paxoscommm.ClientReq{}
-			v2 := &paxoscommm.ClientReq{}
-			v9 := &paxoscommm.ClientReq{}
-			v1 := &paxoscommm.ClientReq{}
-			g.Index(5).BeginNewCommit(v5)
-			g.Index(8).BeginNewCommit(v8)
-			g.Index(2).BeginNewCommit(v2)
-			g.Index(9).BeginNewCommit(v9)
-			g.Index(1).BeginNewCommit(v1)
 
-			/*
-				vctlist[5] = v5
-				vctlist[8] = v8
-				vctlist[2] = v2
-				vctlist[9] = v9
-				vctlist[1] = v1
-			*/
+			g.Index(5).BeginNewCommit(NewClientReq())
+			g.Index(8).BeginNewCommit(NewClientReq())
+			g.Index(2).BeginNewCommit(NewClientReq())
+			g.Index(9).BeginNewCommit(NewClientReq())
+			//g.Index(1).BeginNewCommit(NewClientReq())
 		}
 		fmt.Printf("wait 1 \n")
 		g.WaitForNode()
@@ -94,7 +88,7 @@ func main() {
 			if v == nil {
 				continue
 			}
-			fmt.Printf("cur idx:%d value:%+v msgstat:%+v\n", idx, v, g.Index(idx).GetCurMsgState())
+			fmt.Printf("cur idx:%d value:%+v \n", idx, v)
 		}
 		gt.Stop()
 	}
