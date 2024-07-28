@@ -9,10 +9,8 @@ type MasterInfo struct {
 }
 
 type MultiNode struct {
-	id       int                   //节点id
-	priority int                   //节点优先级， 支持通过配置优先级来使得高优先级机器获得master职位
-	recv     chan paxoscommm.PaMsg //多通道的channel
-	accepted []paxoscommm.PaMsg    // seq -> 已经成立的消息
+	id       int //节点id
+	priority int //节点优先级， 支持通过配置优先级来使得高优先级机器获得master职位
 	g        *paxoscommm.PaGroup
 	ms       MasterInfo
 }

@@ -5,9 +5,6 @@ import (
 )
 
 type MultiMsg struct {
-	paxoscommm.PaCommnMsg
-	//master 只有一个操作，accept和commit
-
 }
 
 func (m *MultiMsg) Propose(t MultiMsg) {

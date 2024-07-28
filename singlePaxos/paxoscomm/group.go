@@ -98,7 +98,7 @@ func (m *Group) Report(seq int) {
 		return
 	} else if tmplocalgp != masterIdx {
 		m.invalid++
-		fmt.Printf("not equale seq:%d localresult:%d masteridx:%d\n", seq, tmplocalgp, masterIdx)
+		fmt.Printf("group not equale seq:%d localresult:%d masteridx:%d msg:%+v\n", seq, tmplocalgp, masterIdx, m.list[masterIdx].getmsg(seq))
 	} else {
 		fmt.Printf("seq:%d not desicde \n", seq)
 		m.nodecidenum++

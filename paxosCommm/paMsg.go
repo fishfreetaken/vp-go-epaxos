@@ -1,45 +1,47 @@
 package paxoscommm
 
 import (
-	"bytes"
 	"fmt"
 	"math"
-	"runtime"
 )
 
 const (
-	PAXOS_MSG_BEGIN_PROPOSE   = iota //正在发起propose的流程中
-	PAXOS_MSG_SMALL_PROPOSEID        //拒绝的状态
-	PAXOS_MSG_HAS_ACCEPTED           //已经接受了，这里是确定提议
-	PAXOS_MSG_ACCEPTED_FAILED        //accept我自己失败了，因为我的proposeid比你的大，但是你已经accept了我没有办法改变
-	PAXOS_MSG_HAS_COMMITED           //已经提交，有一些节点可能被其他的accept，所以需要commit阶段进行提交
-	PAXOS_MSG_HAS_FAILED             //这次决议已经失败，选票被瓜分了，没有谁获得了成功过
+	PAXOS_MSG_BEGIN_PROPOSE = iota //正在发起propose的流程中
+	PAXOS_MSG_HAS_ACCEPTED         //已经接受了，这里是确定提议
+	PAXOS_MSG_HAS_COMMITED         //已经提交，有一些节点可能被其他的accept，所以需要commit阶段进行提交
 )
 
+type PaxosProposeId struct {
+	id uint32
+}
+
+func (m *PaxosProposeId) GetNode() uint32 {
+	return m.id
+}
+
+func (m *PaxosProposeId) IsBehind(t *PaxosProposeId) bool {
+	return m.id < t.id
+}
+
+func (m *PaxosProposeId) UpdateMax(t *PaxosProposeId) {
+	if m.id < t.id {
+		m.id = t.id
+	}
+}
+
+type PaxosMsg struct {
+	from uint32
+	body []uint32
+}
+
 type PaxosState struct {
-	State     int32
-	ProposeId uint32 //这个值是要比较和更新最大的
-	Vote      uint32 //选的谁
-}
-
-func (m *PaxosState) GetVote() uint32 {
-	return m.Vote
-}
-
-func (m *PaxosState) IsVote(v uint32) bool {
-	return m.Vote == v
-}
-
-func (m *PaxosState) GetProposeId() uint32 {
-	return m.ProposeId
+	state     int32
+	proposeId PaxosProposeId //这个值是要比较和更新最大的
+	tb        PaxosMsg       //需要处理的消息
 }
 
 func (m *PaxosState) IsPropose() bool {
 	return m.State == PAXOS_MSG_BEGIN_PROPOSE
-}
-
-func (m *PaxosState) IsProposeFailed() bool {
-	return m.State == PAXOS_MSG_SMALL_PROPOSEID
 }
 
 func (m *PaxosState) HasAccept() bool {
@@ -58,45 +60,12 @@ func (m *PaxosState) IsCommit() bool {
 	return m.State == PAXOS_MSG_HAS_COMMITED
 }
 
-func (m *PaxosState) IsFailed() bool {
-	return m.State == PAXOS_MSG_HAS_FAILED
-}
-
-//accept失败，收到其中小的proposeid的状态
-func (m *PaxosState) StepToSmallProposeID(t *PaxosState) {
-	m.State = PAXOS_MSG_SMALL_PROPOSEID
-	m.ProposeId = t.ProposeId
-	m.Vote = t.Vote
-}
-
-func (m *PaxosState) StepAccept(vote uint32) bool {
+func (m *PaxosState) StepAccept() bool {
 	if m.HasAccept() {
 		return false
 	}
 	m.State = PAXOS_MSG_HAS_ACCEPTED
-	m.Vote = vote
 	return true
-}
-
-func (m *PaxosState) StepProposeFailed() bool {
-	if m.HasAccept() {
-		return false
-	}
-	m.State = PAXOS_MSG_SMALL_PROPOSEID
-	return true
-}
-
-func (m *PaxosState) StepAcceptFailed() bool {
-	if m.HasCommit() {
-		return false
-	}
-	m.State = PAXOS_MSG_ACCEPTED_FAILED
-	return true
-}
-
-func (m *PaxosState) IsAcceptFailed() bool {
-
-	return m.State == PAXOS_MSG_ACCEPTED_FAILED
 }
 
 func (m *PaxosState) StepCommit(vote uint32) bool {
@@ -104,40 +73,12 @@ func (m *PaxosState) StepCommit(vote uint32) bool {
 		return false
 	}
 	m.State = PAXOS_MSG_HAS_COMMITED
-	m.Vote = vote
-	return true
-}
-
-func (m *PaxosState) printStack() {
-	var buf bytes.Buffer
-
-	// 获取当前的堆栈信息
-	stack := make([]byte, 1024)
-	length := runtime.Stack(stack, false)
-
-	// 打印堆栈信息
-	buf.Write(stack[:length])
-	fmt.Printf("m:%+v stack:%s ", m, buf.String())
-}
-
-//commit failed
-func (m *PaxosState) StepFailed() bool {
-	if m.IsCommit() {
-		panic(fmt.Sprintf("step failed has commit:%+v", m))
-	}
-	if m.IsFailed() {
-		return false
-	}
-
-	//m.printStack()
-	m.State = PAXOS_MSG_HAS_FAILED
-	m.Vote = math.MaxUint32
 	return true
 }
 
 //定义proposeid落后的语意
 func (m *PaxosState) IsBehind(p *PaxosState) bool {
-	return p.ProposeId > m.ProposeId
+	return m.proposeId.IsBehind(&p.proposeId)
 }
 
 func (m *PaxosState) Check(t *PaxosState) bool {
@@ -163,18 +104,17 @@ const (
 //交换消息
 type SwapMsgVoteInfo struct {
 	Flowtype int32 //最高位置进行标记，节省内存
+	fromid   uint32
 	Seq      uint64
-	State    PaxosState //每个位置的状态也不一致
-	Fromid   uint32
-	Cmd      string //有可能带上执行的命令
+	state    PaxosState //每个位置的状态也不一致
 }
 
 func (m *SwapMsgVoteInfo) GetSeqID() uint64 {
 	return m.Seq
 }
 
-func (m *SwapMsgVoteInfo) GetFromID() uint32 {
-	return m.Fromid
+func (m *SwapMsgVoteInfo) GetFromId() uint32 {
+	return m.fromid
 }
 
 func (m *SwapMsgVoteInfo) StepAck(f uint32) uint32 {
@@ -185,15 +125,14 @@ func (m *SwapMsgVoteInfo) StepAck(f uint32) uint32 {
 	} else {
 		panic(fmt.Sprintf("invalid flow type:%+v", m))
 	}
-	rawfrom := m.Fromid
-	m.Fromid = f
+	rawfrom := m.fromid
+	m.fromid = f
 	return rawfrom
 }
 
 type ClientReq struct {
-	Instanceid uint64 //事务版本  如果有了需要查询这个事务是否完成
-	RetryTimes uint32 //只能进行有限次数的重试吧，不能一直重试
-	Body       string //任何指令要搞成字符串的形式，自己解析
+	Instanceid uint64 //通过这个id索引找的值
+	RetryTimes uint32 //只能进行有限次数的重试吧，不能一直重试，如果多次都被强占了
 }
 
 func isImpossible(membernum, curCount, maxNum, passNum uint32) bool {
@@ -204,38 +143,37 @@ func isImpossible(membernum, curCount, maxNum, passNum uint32) bool {
 }
 
 type ProposeInfo struct {
-	sucCnt  uint32 //过滤重复的请求，一般来说不应该出现重复的请求，我这里一个请求只会出现一个ack，
-	failCnt uint32
+	bit []uint32 //统计数量，用来bitcount
 }
 
-func (m *ProposeInfo) IncSuc() {
-	m.sucCnt++
-}
+func (m *ProposeInfo) AddAckState(fromid uint32) bool {
 
-func (m *ProposeInfo) IncFail() {
-	m.failCnt++
-}
-
-func isPaxosFail(failcnt, membernum uint32) bool {
-	return failcnt >= ((membernum >> 1) + (membernum % 2))
-}
-
-func (m *ProposeInfo) Judge(st *PaxosState, membernum uint32) {
-	if st.HasAccept() {
-		panic(fmt.Sprintf("st:%+v has accept proposinfo:%+v", st, m))
+	pos := fromid / 8
+	idx := fromid % 8
+	for int(pos) < len(m.bit) {
+		m.bit = append(m.bit, 0)
 	}
-	passNum := membernum >> 1
 
-	if isPaxosFail(m.failCnt, membernum) {
-		st.StepProposeFailed()
-		//fmt.Printf("[Warning]ProposeInfo judge id:%d member:%d faile:%d suc:%d has impossbile\n", st.GetVote(), membernum, m.failCnt, m.sucCnt)
-		return
+	if (m.bit[pos-1] & (1 << idx)) > 0 {
+		return false
 	}
-	if m.sucCnt >= passNum {
-		st.StepAccept(st.GetVote())
-		return
+
+	m.bit[pos-1] = m.bit[pos-1] & (1 << idx)
+
+	return true
+}
+
+func (m *ProposeInfo) ExceedHalf(membernum uint32) bool {
+	var cnt uint32
+	for _, v := range m.bit {
+		cnt += BitCount(v)
 	}
-	return
+	h := membernum >> 1
+	if cnt < h {
+		return false
+	}
+
+	return true
 }
 
 type AcceptInfo struct {
@@ -311,22 +249,13 @@ func (m *AcceptInfo) AddAndJudge(s *PaxosState, t *PaxosState, membernum uint32)
 }
 
 type PaCommnMsg struct {
-	Seq    uint64
-	FromId uint32
-	State  PaxosState //PAXOS_MSG_BEGIN_PROPOSE
+	pv PaxosState //propose value
+	av PaxosState //accept value
 
 	ProposeRes ProposeInfo
 	AcceptRes  AcceptInfo
 
 	Body ClientReq //本地提交的时候会保存这个msg
-}
-
-func (m *PaCommnMsg) GetSeqID() uint64 {
-	return m.Seq
-}
-
-func (m *PaCommnMsg) GetFromID() uint32 {
-	return m.FromId
 }
 
 func (m *PaCommnMsg) ClearStackMsg() {
@@ -335,106 +264,78 @@ func (m *PaCommnMsg) ClearStackMsg() {
 
 //接受一个提议
 func (m *PaCommnMsg) Propose(t *SwapMsgVoteInfo) {
-	if t.State.HasAccept() {
-		panic(fmt.Sprintf("invalid type m:%+v t:%+v", m, t))
-	}
-
-	if !m.State.HasAccept() && m.State.IsBehind(&t.State) {
-		m.State = t.State
-		return
-	}
-	//已经accept，没有这个简洁完美的版本，ack还是需要知道m的当前状态的
-	t.State = m.State
+	//更新proposeid，作出承诺
+	m.UpdateMaxProposeID(t)
 }
 
-func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, membersNum uint32) {
-	//避免自己收到自己消息的情况
-	if m.FromId == t.GetFromID() {
-		panic(fmt.Sprintf("cannot vote myself fromid:%d t:%+v m:%+v", m.GetFromID(), t, m))
+func (m *PaCommnMsg) UpdateMaxProposeID(t *SwapMsgVoteInfo) {
+	if m.pv.proposeId.IsBehind(&t.state.proposeId) {
+		m.pv.proposeId.UpdateMax(&t.state.proposeId)
+	}
+}
+
+func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, nodeid, membersNum uint32) (ac *SwapMsgVoteInfo) {
+
+	if m.pv.HasAccept() {
+		return
+	}
+	//去重复
+	if !m.ProposeRes.AddAckState(t.GetFromId()) {
+		fmt.Printf("[Error]duplicate msg t:%+v m:%+v", t, m)
+		return
 	}
 
-	if t.State.HasAccept() {
-		if t.State.IsBehind(&m.State) {
-			//这个时候我还有可能胜利的
-			m.ProposeRes.IncFail()
-		} else {
-			//这里要走后边的accept的流程，这个其实用户已经进入accept了，这里其实不可能走到这里
-			panic(fmt.Sprintf("accept can input t:%+v m:%+v", t, m))
+	if t.state.IsCommit() {
+		m.Commit(t)
+		return nil
+	}
+
+	if t.state.IsAccept() {
+		//更新最大的accept的值
+		if m.av.proposeId.IsBehind(&t.state.proposeId) {
+			m.av = t.state
 		}
-	} else {
-		if t.State.IsBehind(&m.State) {
-			//老的无效数据不考虑了
-			//特别异常的一个情况，只有冲突的时候才会有这种情况
-			// 我更新了一个最大的proposeid，但是后边又来了一个旧值，所以这种情况还是允许发生的
-			//panic(fmt.Sprintf("smaller proporse than local t:%+v m:%+v\n", t, m))
-			return
-		} else if m.State.IsBehind(&t.State) {
-			//对方的ProposeId比自己的大 ，todo 放弃或者择机重新发起
-			// 三个策略：
-			// 1 冲突放弃；2 冲突重试；3 冲突接受(算是我学习到了这个值)
-			//fmt.Printf("bigger proporse than local seq:%d  remote %d:%d_local:%d:%d\n", t.Vt.Seq, t.Vt.FromId, t.Vt.ProposeId, m.Vt.FromId, m.Vt.ProposeId)
-			//先接受这个提议，挡住后边的accept请求,,如果收到醉倒的proposeid的话，一定要更新proposeid
-			//m.Vt.ProposeId = t.Vt.ProposeId
-			//fmt.Printf("SetPropose small before nodeid:%d t:%+v m:%+v\n", m.FromId, t, m)
-			//遇到小的值退出
-			//这里其实是我的proposid小了，要接受你的值
-			m.State.StepToSmallProposeID(&t.State)
-			//这里也是要触发一个新的提交流程
-			//fmt.Printf(" localnodid:%d update t:%+v m:%+v\n", nodeid, t, m)
-			return
+	}
+
+	m.UpdateMaxProposeID(t)
+
+	//查看是否过半数
+	if !m.ProposeRes.ExceedHalf(membersNum) {
+		return
+	}
+
+	//如果当前选的是自己
+	//强制让自己接受自己
+	if !m.av.IsAccept() && m.pv.proposeId.GetNode() == nodeid {
+		m.pv.StepAccept()
+
+		//如果是自己提出来的值，直接接受自己
+		ac = &SwapMsgVoteInfo{
+			Flowtype: PAXOS_MSG_ACCEPT,
+			fromid:   nodeid,
+			Seq:      t.Seq,
+			state:    m.pv,
 		}
-		m.ProposeRes.IncSuc()
-	}
 
-	//看你的选票还是我的话，可以继续完
-	if !m.State.IsVote(m.FromId) {
-		panic(fmt.Sprintf("impossible accept you t:%+v m:%+v", t, m))
+		m.Accept(ac)
 	}
-
-	m.ProposeRes.Judge(&m.State, membersNum)
 	return
 }
 
-func (m *PaCommnMsg) BuildSwapMsg(flowType int32) *SwapMsgVoteInfo {
-	return &SwapMsgVoteInfo{
-		Flowtype: flowType,
-		Seq:      m.Seq,
-		State:    m.State,
-		Fromid:   m.FromId,
-		Cmd: func() string {
-			if flowType == PAXOS_MSG_ACCEPT || flowType == PAXOS_MSG_COMMIT {
-				return m.Body.Body
-			}
-			return ""
-		}(),
-	}
-}
-
 func (m *PaCommnMsg) Accept(t *SwapMsgVoteInfo) bool {
-	if t.State.HasCommit() {
+
+	if t.state.HasCommit() {
 		panic(fmt.Sprintf("uniq proposeid vote diff t:%+v m:%+v\n", t, m))
 	}
 
-	if m.State.HasAccept() {
-		//这里还是要处理拷贝的，这了是别人已经accept了
-		t.State = m.State
+	if t.state.proposeId.IsBehind(&m.pv.proposeId) {
 		return false
 	}
 
-	//不接受低的proposid的accept，我没有accept，我就要拿你的值来替换我的
-	if t.State.IsBehind(&m.State) {
-		//t的状态需要重置，这里已经impossible了
-		//都accept了，不需要关心这个proposeid了把
-		t.State.StepAcceptFailed()
-		return false
-	}
+	m.pv.proposeId.UpdateMax(&t.state.proposeId)
+	m.av = t.state
 
-	//accept我不需要关心这个proposeid的值了
-	//真正的accept
-	if !m.State.StepAccept(t.State.Vote) {
-		panic(fmt.Sprintf("step accept failed t:%+v m:%+v\n", t, m))
-	}
-	return true
+	return false
 }
 
 func (m *PaCommnMsg) AcceptAck(t *SwapMsgVoteInfo, membernum uint32) (change bool) {
@@ -446,7 +347,7 @@ func (m *PaCommnMsg) AcceptAck(t *SwapMsgVoteInfo, membernum uint32) (change boo
 	}
 
 	//这两个状态已经可以直接返回了
-	if m.State.HasCommit() || m.State.IsAcceptFailed() {
+	if m.av.HasCommit() {
 		return
 	}
 

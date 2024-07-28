@@ -22,15 +22,16 @@ func SetupPProf() {
 	}
 }
 
-func NewClientReq() *paxoscommm.ClientReq {
+func NewClientReq(t string) *paxoscommm.ClientReq {
 	return &paxoscommm.ClientReq{
 		RetryTimes: 3,
+		Body:       t,
 	}
 }
 
 func main() {
 	go SetupPProf()
-	seqNum := 500000
+	seqNum := 50000
 	nodenumber := uint32(11)
 	/*
 		f, _ := os.Create("myTrace.dat")
@@ -58,11 +59,11 @@ func main() {
 			}
 			gSeqNum = int32(i)
 
-			g.Index(5).BeginNewCommit(NewClientReq())
-			g.Index(8).BeginNewCommit(NewClientReq())
-			g.Index(2).BeginNewCommit(NewClientReq())
-			g.Index(9).BeginNewCommit(NewClientReq())
-			//g.Index(1).BeginNewCommit(NewClientReq())
+			g.Index(5).BeginNewCommit(NewClientReq(fmt.Sprintf("%d_%d", i, 5)))
+			g.Index(8).BeginNewCommit(NewClientReq(fmt.Sprintf("%d_%d", i, 8)))
+			g.Index(2).BeginNewCommit(NewClientReq(fmt.Sprintf("%d_%d", i, 2)))
+			g.Index(9).BeginNewCommit(NewClientReq(fmt.Sprintf("%d_%d", i, 9)))
+			g.Index(1).BeginNewCommit(NewClientReq(fmt.Sprintf("%d_%d", i, 1)))
 		}
 		fmt.Printf("wait 1 \n")
 		g.WaitForNode()

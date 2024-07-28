@@ -28,3 +28,13 @@ func MaxValue(a, b uint32) uint32 {
 	}
 	return b
 }
+
+func BitCount(t uint32) uint32 {
+	var cc uint32
+	for t > 0 {
+		if (t & 1) > 0 {
+			cc++
+		}
+	}
+	return cc
+}

@@ -62,8 +62,19 @@ func (m *PaNode) SetVecLkNums(g *PaGroup, membernum uint32) {
 }
 
 func (m *PaNode) BeginNewCommit(r *ClientReq) {
+
 	r.Instanceid = atomic.AddUint64(&m.instanceid, 1)
 	m.msgChannel <- r
+}
+
+func (m *PaNode) BeginNew2Commit(r *ClientReq) {
+	var tmp = &ClientReq{
+		RetryTimes: r.RetryTimes,
+		Body:       r.Body,
+	}
+
+	tmp.Instanceid = atomic.AddUint64(&m.instanceid, 1)
+	m.msgChannel <- tmp
 }
 
 func (m *PaNode) ListNewMsg() {
@@ -116,7 +127,6 @@ func (m *PaNode) NewProPoseMsg(req *ClientReq) {
 	}
 
 	m.mpLocPropose.Store(iCurInstanceId, &AckState{
-		//t:   time.Now(),
 		seq: iCurSeq,
 	})
 
@@ -270,7 +280,6 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (int32, string) {
 	iLocalInstancId := r.Body.Instanceid
 	if iLocalInstancId == 0 {
 		//本地没有注册这个值
-
 		return -1, "-1"
 	}
 
@@ -285,9 +294,8 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (int32, string) {
 	value := rawValue.(*AckState)
 	if value.seq != r.Seq {
 		//来一条消息，instance的id本身就是独立的
-
-		//panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r))
-		return -1000001, fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r)
+		panic(fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r))
+		//return -1000001, fmt.Sprintf("[Error]ResultReporr value not equal node:%d insid:%d ins:%+v result:%d r:%+v ", m.id, iLocalInstancId, value, result, r)
 	}
 
 	if value.iCode != 0 {
@@ -312,12 +320,13 @@ func (m *PaNode) ResultReport(r *PaCommnMsg, result int) (int32, string) {
 
 		//fmt.Printf("ResultReport need retry id:%d seqid:%d instanc:%d resultCode:%d  msg:%+v\n", m.id, r.Vt.Seq, iCurInstance, result, r)
 		//如果失败了就要发起重试
-		if r.Body.RetryTimes <= 0 {
-			fmt.Printf("[Warning][nodeid:%d][instanceid:%d]has exceed retrytimes ", m.id, iLocalInstancId)
-		} else {
+		if r.Body.RetryTimes > 0 {
 			r.Body.RetryTimes--
 			//最后ok了再重试
-			//m.BeginNewCommit(&r.Body)
+			//fmt.Printf("[Trace]retry instance nodeid:%d instanceid:%d \n", m.id, iLocalInstancId)
+			m.BeginNew2Commit(&r.Body)
+		} else {
+			//fmt.Printf("[Warning][nodeid:%d]retry instance zero [instanceid:%d]has exceed retrytimes \n", m.id, iLocalInstancId)
 		}
 	}
 
@@ -356,7 +365,7 @@ func (m *PaNode) Step(t *SwapMsgVoteInfo) {
 	r := m.GetSeqMsg(t.GetSeqID())
 
 	//基本检查
-	if !r.State.Check(&t.State) || t.Seq != r.Seq {
+	if !r.state.Check(&t.State) || t.Seq != r.GetSeqID() {
 		panic(fmt.Sprintf("node:%d m:%+v \n t:%+v\n", m.GetId(), r, t))
 	}
 
@@ -378,15 +387,15 @@ func (m *PaNode) Step(t *SwapMsgVoteInfo) {
 	default:
 		panic(fmt.Sprintf("nodeid:%d invalid flow type t:%+v m:%+v", m.id, t, r))
 	}
-	if r.Seq != t.Seq {
-		panic(fmt.Sprintf("node:%d m:%+v \n t:%+v\n", m.GetId(), r, t))
-	}
 }
 
 //传指针
 func (m *PaNode) Propose(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 	//提议阶段InForm
-	//做一件很简单的事情，比较proposeid，拷贝赋值
+	//已经接受了，没有必要再走下一步
+	if t.fromid == m.id {
+		panic(fmt.Sprintf("invalid from id:%d t:%+v  r:%+v", m.id, t, r))
+	}
 
 	r.Propose(t)
 	//这个肯定是要ack的
@@ -395,7 +404,12 @@ func (m *PaNode) Propose(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 
 func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 
-	if r.State.HasCommit() {
+	if r.isAccepted() {
+		return
+	}
+
+	if r.state.HasCommit() {
+		//这里有可能第一次收到的值就是commit
 		//提交的时候是乱序的，这里有可能当时找不到对应的seq，后边有人帮忙commit了，后边就丢弃这里的值了
 		//补充一个，如果自己预先已经commit了，将这个结果补充进去(千万不要以为自己想通了就删掉,之前删除过一次，遇到阻塞又加回来了)
 		//这里已经commit了，为什么不在commit的地方进行通知呢
@@ -403,37 +417,22 @@ func (m *PaNode) ProposeAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 		return
 	}
 
-	if !r.State.IsPropose() || !r.State.IsVote(m.id) {
-		//状态已经发生变化了，没有必要接受后边的请求
-		//我已经accept了，没有意义接受这个阶段
-		//减少cpu压力，及时返回，减少无意义的判断释
-		return
-	}
-
 	//t有可能是commit的
 	if t.State.HasCommit() {
 		m.Commit(t, r)
 		return
-	} else if t.State.HasAccept() && !t.State.IsBehind(&r.State) {
-		m.Accept(t, r)
-		return
 	}
 
 	//正常的提交流程
-	r.ProposeAck(t, m.g.GetNumber())
-	if !r.State.IsPropose() {
-		if !r.State.IsVote(m.id) || r.State.IsProposeFailed() {
+	if r.ProposeAck(t, m.g.GetNumber()) {
+		if !r.state.IsVote(m.id) {
+			//已经失败了
 			//选的不是自己的就直接失败了
 			//或者被其他的accept住了
 			m.ResultReport(r, PANODE_RESULT_BIG_PROPOSEID)
-		} else if r.State.IsAccept() {
-			if !r.State.IsVote(m.id) {
-				panic(fmt.Sprintf("id:%d r:%+v t:%+v", m.id, r, t))
-			}
-			go m.g.Broadcastexcept(r.BuildSwapMsg(PAXOS_MSG_ACCEPT))
-		} else if r.State.HasCommit() {
-			panic(fmt.Sprintf("impossible isu:%+v r:%+v", t, r))
 		}
+		//todo，这里怎么帮你避免重复accept对应的数据
+		go m.g.Broadcastexcept(r.BuildSwapMsg(PAXOS_MSG_ACCEPT))
 	}
 }
 
@@ -447,13 +446,13 @@ func (m *PaNode) Accept(t *SwapMsgVoteInfo, r *PaCommnMsg) (bAck bool) {
 		m.Commit(t, r)
 		return
 	}
+
 	bAck = true
 	if r.Accept(t) {
-		if !r.State.IsVote(m.id) {
+		if !r.state.IsVote(m.id) {
 			//这里智能接受别人给的值，选举自己的就肯定有问题
 			m.ResultReport(r, PANODE_RESULT_OTHER_ACCEPT)
 		}
-		//fmt.Printf("[DEBUG]Accept valid id:%d t:%+v r:%+v \n", m.id, t, r)
 		//自己接受了，但是不是自己的值，这里其实已经失败了
 	}
 	return
@@ -461,6 +460,17 @@ func (m *PaNode) Accept(t *SwapMsgVoteInfo, r *PaCommnMsg) (bAck bool) {
 
 func (m *PaNode) AcceptAck(t *SwapMsgVoteInfo, r *PaCommnMsg) {
 	//将数据写入本地的msg里
+	if r.state.HasCommit() {
+		return
+	}
+
+	//有可能别人帮你commit的
+	if t.State.HasCommit() {
+		m.Commit(t, r)
+		m.ResultReport(r, PANODE_RESULT_COMMIT)
+		return
+	}
+
 	bAccept := r.AcceptAck(t, m.g.GetNumber()) // 返回是否落盘
 	//判断是否能进入到下一个阶段
 	if bAccept {
