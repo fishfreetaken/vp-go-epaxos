@@ -39,7 +39,7 @@ func (m *PaGroup) Broadcast(st *SwapMsgVoteInfo) {
 
 func (m *PaGroup) Broadcastexcept(st *SwapMsgVoteInfo) {
 	for i, v := range m.list {
-		if i == int(st.GetFromID()) {
+		if i == int(st.GetFromId()) {
 			continue
 		}
 		m.Sendto(v.GetId(), st)
@@ -66,17 +66,17 @@ func (m *PaGroup) ResultCheck() uint64 {
 	return totalSeq
 }
 
-//获取到最大的seqid，就要一个一个的check结果
+// 获取到最大的seqid，就要一个一个的check结果
 func (m *PaGroup) Report(seq uint64) {
 	var rc = make(map[uint32][]uint32)
 	for _, v := range m.list {
-		tsp := v.GetSeqMsg(seq)
-		if !tsp.State.HasAccept() || tsp.State.IsFailed() {
+		ok, tsp := v.GetSeqMsg(seq)
+		if !ok || !tsp.ps.HasAccept() {
 			//没有accept就不需要统计了
 			//fmt.Printf("[ERROR]Laset report seq:%d  nodeid:%d not accept:%+v\n", seq, v.GetId(), tsp)
 			continue
 		}
-		rc[tsp.State.GetVote()] = append(rc[tsp.State.GetVote()], v.GetId())
+		rc[tsp.ps.GetAcceptWho()] = append(rc[tsp.ps.GetAcceptWho()], v.GetId())
 	}
 
 	masterIdx := uint32(math.MaxUint32)
@@ -86,7 +86,8 @@ func (m *PaGroup) Report(seq uint64) {
 			panic(func() string {
 				at := fmt.Sprintf("invalid key seq:%d v:%+v:\n", seq, v)
 				for _, idex := range v {
-					at += fmt.Sprintf("%+v\n", m.list[idex].GetSeqMsg(seq))
+					_, t := m.list[idex].GetSeqMsg(seq)
+					at += fmt.Sprintf("%+v\n", t)
 				}
 				return at
 			}())
@@ -106,7 +107,8 @@ func (m *PaGroup) Report(seq uint64) {
 
 		//把手下每一个有问题的msg都打印出来，我就不信了
 		for idx := range m.list {
-			fmt.Printf("sub idx:%d msg:%+v\n", idx, m.list[idx].GetSeqMsg(seq))
+			_, t := m.list[idx].GetSeqMsg(seq)
+			fmt.Printf("sub idx:%d msg:%+v\n", idx, t)
 		}
 	}
 
@@ -138,24 +140,26 @@ func (m *PaGroup) InformVoteResult(t *SwapMsgVoteInfo) {
 	m.recvseq <- t
 }
 
-//总的master来统计各个提交的数据是否有冲突
+// 总的master来统计各个提交的数据是否有冲突
 func (m *PaGroup) AsyncWaitResult() {
 	for v := range m.recvseq {
 		//fmt.Printf("AsyncWaitResult seq:%d acceptinfo:%+v\n", v.Seq, v)
-		if hasMasterid, ok := m.mpResult[v.Seq]; ok {
-			if hasMasterid != v.State.GetVote() {
+		if hasMasterid, ok := m.mpResult[v.seq]; ok {
+			if hasMasterid != v.state.GetAcceptWho() {
 				panic(func() string {
-					sa := fmt.Sprintf("seq:%d hasmaster:%d masterid:%+v \n", v.Seq, hasMasterid, v)
+					sa := fmt.Sprintf("seq:%d hasmaster:%d masterid:%+v \n", v.seq, hasMasterid, v)
 					if hasMasterid != math.MaxUint32 {
-						sa += fmt.Sprintf("hasMasterid :%d %+v\n", hasMasterid, m.list[hasMasterid].GetSeqMsg(v.Seq))
+						_, t := m.list[hasMasterid].GetSeqMsg(v.seq)
+						sa += fmt.Sprintf("hasMasterid :%d %+v\n", hasMasterid, t)
 					}
-					sa += fmt.Sprintf("fromid :%d %+v\n", v.State.GetVote(), m.list[v.GetFromID()].GetSeqMsg(v.Seq))
+					_, t := m.list[v.state.proposeId.GetNode()].GetSeqMsg(v.seq)
+					sa += fmt.Sprintf("fromid :%d %+v\n", v.state.GetAcceptWho(), t)
 					return sa
 				}())
 				//panic(fmt.Sprintf("seq:%d hasmaster:%d masterid:%+v :\n %+v \n%+v", v.Seq, hasMasterid, v, m.list[hasMasterid].GetSeqMsg(v.Seq), m.list[v.AcceptVote].GetSeqMsg(v.Seq)))
 			}
 		} else {
-			m.mpResult[v.Seq] = v.State.GetVote()
+			m.mpResult[v.seq] = v.state.GetAcceptWho()
 		}
 	}
 }

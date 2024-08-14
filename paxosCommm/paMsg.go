@@ -2,7 +2,7 @@ package paxoscommm
 
 import (
 	"fmt"
-	"math"
+	"math/rand"
 )
 
 const (
@@ -11,88 +11,92 @@ const (
 	PAXOS_MSG_HAS_COMMITED         //已经提交，有一些节点可能被其他的accept，所以需要commit阶段进行提交
 )
 
+const (
+	PAXOS_OFFSET_ID_SET = 1000
+)
+
 type PaxosProposeId struct {
 	id uint32
 }
 
 func (m *PaxosProposeId) GetNode() uint32 {
-	return m.id
+	return m.id % PAXOS_OFFSET_ID_SET
 }
 
 func (m *PaxosProposeId) IsBehind(t *PaxosProposeId) bool {
 	return m.id < t.id
 }
 
-func (m *PaxosProposeId) UpdateMax(t *PaxosProposeId) {
-	if m.id < t.id {
-		m.id = t.id
-	}
+func (m *PaxosProposeId) IsEqual(t *PaxosProposeId) bool {
+	return m.id == t.id
+}
+
+func (m *PaxosProposeId) GenPPId(nodeid uint32) {
+	m.id = uint32(rand.Intn(100000)*PAXOS_OFFSET_ID_SET) + nodeid
 }
 
 type PaxosMsg struct {
 	from uint32
-	body []uint32
+	body []byte
+}
+
+func (m *PaxosMsg) GetFrom() uint32 {
+	return m.from
 }
 
 type PaxosState struct {
 	state     int32
-	proposeId PaxosProposeId //这个值是要比较和更新最大的
-	tb        PaxosMsg       //需要处理的消息
+	proposeId PaxosProposeId
+	acceptmsg PaxosMsg //接受并处理的消息
+}
+
+func (m *PaxosState) GetAcceptWho() uint32 {
+	return m.acceptmsg.from
+}
+
+func (m *PaxosState) IsBigger(s *PaxosState) bool {
+	return m.proposeId.IsBehind(&s.proposeId)
+}
+
+func (m *PaxosState) IsSameProposeId(s *PaxosState) bool {
+
+	return m.proposeId.id == s.proposeId.id
 }
 
 func (m *PaxosState) IsPropose() bool {
-	return m.State == PAXOS_MSG_BEGIN_PROPOSE
+	return m.state == PAXOS_MSG_BEGIN_PROPOSE
 }
 
 func (m *PaxosState) HasAccept() bool {
-	return m.State >= PAXOS_MSG_HAS_ACCEPTED
+	return m.state >= PAXOS_MSG_HAS_ACCEPTED
 }
 
 func (m *PaxosState) IsAccept() bool {
-	return m.State == PAXOS_MSG_HAS_ACCEPTED
-}
-
-func (m *PaxosState) HasCommit() bool {
-	return m.State >= PAXOS_MSG_HAS_COMMITED
+	return m.state == PAXOS_MSG_HAS_ACCEPTED
 }
 
 func (m *PaxosState) IsCommit() bool {
-	return m.State == PAXOS_MSG_HAS_COMMITED
+	return m.state == PAXOS_MSG_HAS_COMMITED
 }
 
 func (m *PaxosState) StepAccept() bool {
 	if m.HasAccept() {
 		return false
 	}
-	m.State = PAXOS_MSG_HAS_ACCEPTED
+	m.state = PAXOS_MSG_HAS_ACCEPTED
 	return true
 }
 
-func (m *PaxosState) StepCommit(vote uint32) bool {
-	if m.HasCommit() {
+func (m *PaxosState) StepCommit() bool {
+
+	if m.IsCommit() {
 		return false
 	}
-	m.State = PAXOS_MSG_HAS_COMMITED
+	m.state = PAXOS_MSG_HAS_COMMITED
 	return true
 }
 
-//定义proposeid落后的语意
-func (m *PaxosState) IsBehind(p *PaxosState) bool {
-	return m.proposeId.IsBehind(&p.proposeId)
-}
-
-func (m *PaxosState) Check(t *PaxosState) bool {
-
-	if t.IsPropose() && m.IsPropose() && m.ProposeId == t.ProposeId && t.Vote != m.Vote {
-		return false
-	}
-	//commit只能有一个提交
-	if m.IsCommit() && t.IsCommit() && m.Vote != t.Vote {
-		return false
-	}
-	return true
-}
-
+// Flowtype
 const (
 	PAXOS_MSG_PROPOSE = iota
 	PAXOS_MSG_PROPOSE_ACK
@@ -101,20 +105,24 @@ const (
 	PAXOS_MSG_COMMIT //不需要ack
 )
 
-//交换消息
+// 交换消息
 type SwapMsgVoteInfo struct {
-	Flowtype int32 //最高位置进行标记，节省内存
-	fromid   uint32
-	Seq      uint64
+	Flowtype int32      //最高位置进行标记，节省内存
 	state    PaxosState //每个位置的状态也不一致
+	seq      uint64
+	fromid   uint32
 }
 
 func (m *SwapMsgVoteInfo) GetSeqID() uint64 {
-	return m.Seq
+	return m.seq
 }
 
 func (m *SwapMsgVoteInfo) GetFromId() uint32 {
 	return m.fromid
+}
+
+func (m *SwapMsgVoteInfo) SetFromId(f uint32) {
+	m.fromid = f
 }
 
 func (m *SwapMsgVoteInfo) StepAck(f uint32) uint32 {
@@ -131,260 +139,214 @@ func (m *SwapMsgVoteInfo) StepAck(f uint32) uint32 {
 }
 
 type ClientReq struct {
-	Instanceid uint64 //通过这个id索引找的值
-	RetryTimes uint32 //只能进行有限次数的重试吧，不能一直重试，如果多次都被强占了
-}
-
-func isImpossible(membernum, curCount, maxNum, passNum uint32) bool {
-	if (membernum - curCount + maxNum) < passNum {
-		return true
-	}
-	return false
+	Instanceid uint64 //通过这个id索引找的提交的值，看那个提交的值没有通过
+	//RetryTimes uint32 //只能进行有限次数的重试吧，不能一直重试，如果多次都被强占了
+	pm PaxosMsg
 }
 
 type ProposeInfo struct {
-	bit []uint32 //统计数量，用来bitcount
+	b  PaBitCount
+	ac PaxosState //已经接受的最大的请求的值
 }
 
-func (m *ProposeInfo) AddAckState(fromid uint32) bool {
-
-	pos := fromid / 8
-	idx := fromid % 8
-	for int(pos) < len(m.bit) {
-		m.bit = append(m.bit, 0)
-	}
-
-	if (m.bit[pos-1] & (1 << idx)) > 0 {
-		return false
-	}
-
-	m.bit[pos-1] = m.bit[pos-1] & (1 << idx)
-
-	return true
+func (m *ProposeInfo) IsSucc(member uint32) bool {
+	return m.b.ExceedHalf(member)
 }
 
-func (m *ProposeInfo) ExceedHalf(membernum uint32) bool {
-	var cnt uint32
-	for _, v := range m.bit {
-		cnt += BitCount(v)
-	}
-	h := membernum >> 1
-	if cnt < h {
-		return false
-	}
-
-	return true
+func (m *ProposeInfo) AddOne(member uint32) bool {
+	return m.b.Add(member)
 }
 
 type AcceptInfo struct {
-	votelist []uint32 //这里存各个节点的选择的列表，这里也是不需要过滤重复的
-	failCnt  uint32   //那些由于proposeid小于的返回的fail
+	b PaBitCount
 }
 
-func (m *AcceptInfo) addOne(s *PaxosState) (sum uint32) {
-
-	defer func() {
-		sum = m.failCnt + uint32(len(m.votelist))
-	}()
-
-	if s.IsAcceptFailed() {
-		m.failCnt++
-		return
-	}
-	m.votelist = append(m.votelist, s.GetVote())
-	return
+func (m *AcceptInfo) addOne(from uint32) bool {
+	return m.b.Add(from)
 }
 
-func (m *AcceptInfo) AddAndJudge(s *PaxosState, t *PaxosState, membernum uint32) (c bool) {
-	cnt := m.addOne(s)
-
-	passNum := membernum>>1 + 1
-
-	if cnt < passNum {
-		//减少计算量
-		return
-	}
-
-	if cnt > membernum || uint32(len(m.votelist)) > membernum {
-		panic(fmt.Sprintf("vote:%d invalid member num:%d", s.Vote, cnt))
-	}
-
-	if isPaxosFail(m.failCnt, membernum) {
-		//至少有一半以上就是失败了，这里没有必要做什么，等别人commit就好了
-		//但是要通知自己已经失败了
-		c = t.StepAcceptFailed()
-		return
-	}
-
-	if uint32(len(m.votelist)) == 0 {
-		return
-	}
-
-	var mpvote = make(map[uint32]uint32) //vote
-	var maxNum uint32
-	mpvote[t.Vote] = 1
-	//这里看选票是否被瓜分了
-	for _, v := range m.votelist {
-		mpvote[v]++
-		tmpvotenum := mpvote[v]
-		if tmpvotenum >= passNum {
-			c = t.StepCommit(v)
-			return
-		}
-		if tmpvotenum > maxNum {
-			maxNum = tmpvotenum
-		}
-	}
-
-	//判断选票是否被瓜分了
-	//如果这里失败达到一定的次数，本次提交失去了地位已经
-	//这里应该考虑failcnt的数量
-	if isImpossible(membernum, uint32(len(m.votelist))+1, maxNum, passNum) {
-		//选票被瓜分了，谁都胜利不出
-		c = t.StepFailed()
-		fmt.Printf("impossiable accept vote success maxNum:%d membernum:%d cnt:%d fail:%d len:%d t:%+v s:%+v \n", maxNum, membernum, cnt, m.failCnt, len(m.votelist), t, s)
-		return
-	}
-	return
+func (m *AcceptInfo) AcceptSuc(membernum uint32) (c bool) {
+	return m.b.ExceedHalf(membernum)
 }
 
 type PaCommnMsg struct {
-	pv PaxosState //propose value
-	av PaxosState //accept value
+	ps PaxosState //propose value
 
-	ProposeRes ProposeInfo
-	AcceptRes  AcceptInfo
+	ver uint32 //如果不一致，需要计算
 
-	Body ClientReq //本地提交的时候会保存这个msg
+	proposeRes ProposeInfo
+	acceptRes  AcceptInfo
+
+	body ClientReq //本地提交的时候会保存这个msg
 }
 
-func (m *PaCommnMsg) ClearStackMsg() {
-	m.AcceptRes.votelist = m.AcceptRes.votelist[:0]
+func (m *PaCommnMsg) makeChange() {
+	m.ver++
 }
 
-//接受一个提议
-func (m *PaCommnMsg) Propose(t *SwapMsgVoteInfo) {
-	//更新proposeid，作出承诺
-	m.UpdateMaxProposeID(t)
+// 是否已经改变
+func (m *PaCommnMsg) HasChange(ver uint32) bool {
+	return m.ver < ver
 }
 
-func (m *PaCommnMsg) UpdateMaxProposeID(t *SwapMsgVoteInfo) {
-	if m.pv.proposeId.IsBehind(&t.state.proposeId) {
-		m.pv.proposeId.UpdateMax(&t.state.proposeId)
-	}
+func (m *PaCommnMsg) GetVer() uint32 {
+	return m.ver
 }
 
-func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, nodeid, membersNum uint32) (ac *SwapMsgVoteInfo) {
+// 接受一个提议
+func (m *PaCommnMsg) Propose(t *SwapMsgVoteInfo) (ack bool) {
 
-	if m.pv.HasAccept() {
-		return
-	}
-	//去重复
-	if !m.ProposeRes.AddAckState(t.GetFromId()) {
-		fmt.Printf("[Error]duplicate msg t:%+v m:%+v", t, m)
+	if t.state.proposeId.IsEqual(&m.ps.proposeId) || t.state.IsBigger(&m.ps) {
+		//不需要回复了，这里有可能是数据丢失的
 		return
 	}
 
-	if t.state.IsCommit() {
-		m.Commit(t)
-		return nil
-	}
-
-	if t.state.IsAccept() {
-		//更新最大的accept的值
-		if m.av.proposeId.IsBehind(&t.state.proposeId) {
-			m.av = t.state
-		}
-	}
-
-	m.UpdateMaxProposeID(t)
-
-	//查看是否过半数
-	if !m.ProposeRes.ExceedHalf(membersNum) {
+	ack = true
+	if m.ps.HasAccept() {
+		//告诉提案的请求方，已经接受的值
+		//或者拒绝更低的提议
+		t.state = m.ps
 		return
 	}
 
-	//如果当前选的是自己
-	//强制让自己接受自己
-	if !m.av.IsAccept() && m.pv.proposeId.GetNode() == nodeid {
-		m.pv.StepAccept()
-
-		//如果是自己提出来的值，直接接受自己
-		ac = &SwapMsgVoteInfo{
-			Flowtype: PAXOS_MSG_ACCEPT,
-			fromid:   nodeid,
-			Seq:      t.Seq,
-			state:    m.pv,
-		}
-
-		m.Accept(ac)
+	//承诺不接受更小的值
+	//只更新这里的proposeid
+	if m.ps.proposeId.IsBehind(&t.state.proposeId) {
+		m.ps.proposeId = t.state.proposeId
+		m.makeChange()
 	}
 	return
 }
 
-func (m *PaCommnMsg) Accept(t *SwapMsgVoteInfo) bool {
+func (m *PaCommnMsg) ProposeAck(t *SwapMsgVoteInfo, membersNum uint32) (ac *SwapMsgVoteInfo) {
 
-	if t.state.HasCommit() {
-		panic(fmt.Sprintf("uniq proposeid vote diff t:%+v m:%+v\n", t, m))
+	//假如我的propose超过半数了，中间没有更大的accept的值，我就推举决定我自己
+	//假如我propose过程中，收到别人accept过的值，我找一个最大proposeid的来进行accept
+	if !m.proposeRes.AddOne(t.GetFromId()) {
+		fmt.Sprintf("[Error]ProposeAck duplicate msg t:%+v m:%+v", t, m)
+		return
 	}
 
-	if t.state.proposeId.IsBehind(&m.pv.proposeId) {
-		return false
+	if t.state.IsAccept() {
+		if !m.proposeRes.ac.HasAccept() || m.proposeRes.ac.IsBigger(&t.state) {
+			m.proposeRes.ac = t.state
+		}
+		return
 	}
 
-	m.pv.proposeId.UpdateMax(&t.state.proposeId)
-	m.av = t.state
+	//过半数后发起accept的流程
+	if !m.proposeRes.IsSucc(membersNum) {
+		return
+	}
 
-	return false
+	m.makeChange()
+
+	if m.proposeRes.ac.IsAccept() {
+		m.ps = m.proposeRes.ac
+	} else {
+		m.ps.StepAccept()
+	}
+
+	//如果是自己提出来的值，直接接受自己
+	ac = &SwapMsgVoteInfo{
+		Flowtype: PAXOS_MSG_ACCEPT,
+		seq:      t.seq,
+		state:    m.ps,
+	}
+	return
 }
 
-func (m *PaCommnMsg) AcceptAck(t *SwapMsgVoteInfo, membernum uint32) (change bool) {
+func (m *PaCommnMsg) Accept(t *SwapMsgVoteInfo) (ack bool) {
 
-	if !m.State.HasAccept() {
+	if t.state.IsBigger(&m.ps) {
+		//保证不要别人的最小值，不需要返回给对方数据
+		return
+	}
+
+	//accept的状态我是否需要继续更新这里的值？
+	//如果接受到一个更大的值，说明这个值已经占领过半数了，肯定要更新的
+
+	ack = true
+	if m.ps.IsCommit() {
+		t.state = m.ps
+		return
+	}
+
+	//如果不一致就要更新
+	if !m.ps.IsSameProposeId(&t.state) {
+		m.ps = t.state
+		m.makeChange()
+	}
+
+	return
+}
+
+func (m *PaCommnMsg) AcceptAck(t *SwapMsgVoteInfo, membernum uint32) bool {
+
+	if !m.ps.HasAccept() {
 		//对方不会将t的状态进行降级
 		//我请求了对方，但是对方认为你的proposeid比较低而且不是accept的状态，可能还是处在propose的状态，但是我已经accept了，不需要你，拒绝了你
 		panic(fmt.Sprintf("cur id:%+v invalid accept:%+v", m, t))
 	}
 
-	//这两个状态已经可以直接返回了
-	if m.av.HasCommit() {
-		return
+	//已经添加过了
+	if !m.acceptRes.addOne(t.fromid) {
+		return false
 	}
 
-	if t.State.HasCommit() {
-		//直接拷贝吧，还想啥
-		m.State = t.State
-		change = true
-		//清理一下当前的存储
-		return
-	}
+	m.makeChange()
+
+	//假如接受了超过半数的人
 
 	//时刻保持最大proposeid
 	//我已经accept了，没有必要再更新最大的proposeid了
-	//bBigger := m.Vt.UpdateProposeid(&t.Vt)
 	//accept的时候，已经不需要考虑proposeid了
 	//没有accept状态的这种也是要放入的，commit后就不用管了
 
 	//要检查是不是肯定不能成功了，检查所有的票状态
 	//感知到如果是空洞的话，这里提交的就失败了
 
-	return m.AcceptRes.AddAndJudge(&t.State, &m.State, membernum)
-}
-
-func IsInValidVote(vote uint32) bool {
-	return vote == math.MaxUint32
+	return m.acceptRes.AcceptSuc(membernum)
 }
 
 func (m *PaCommnMsg) Commit(t *SwapMsgVoteInfo) bool {
-	if !t.State.HasCommit() {
+	if !t.state.IsCommit() {
 		panic(fmt.Sprintf("no commit %+v %+v", m, t))
 	}
 
-	if m.State.HasCommit() {
+	if m.ps.IsCommit() {
 		//不允许修改
+		fmt.Sprintf("[Trace]m has commit m:%+v t:%+v", m, t)
 		return false
 	}
 	//有可能有的地方没有accept，直接修改状态
-	m.State = t.State
+	m.ps = t.state
 	return true
+}
+
+func (m *PaCommnMsg) BuildSwapMsg(seq uint64, st int32, fromid uint32) *SwapMsgVoteInfo {
+	var lstate int32
+	rst := &SwapMsgVoteInfo{
+		Flowtype: st,
+		seq:      seq,
+		state: PaxosState{
+			proposeId: m.ps.proposeId,
+		},
+		fromid: fromid,
+	}
+
+	if st == PAXOS_MSG_COMMIT {
+		rst.state.acceptmsg = m.ps.acceptmsg
+		lstate = PAXOS_MSG_HAS_COMMITED
+	} else if st == PAXOS_MSG_ACCEPT {
+		rst.state.acceptmsg = m.ps.acceptmsg
+		lstate = PAXOS_MSG_HAS_ACCEPTED
+	} else if st == PAXOS_MSG_PROPOSE {
+		//这个不需要给到提议的值
+		lstate = PAXOS_MSG_BEGIN_PROPOSE
+	} else {
+		panic(fmt.Sprintf("st:%d fromid:%d invalid build swap msg:%+v", st, fromid, m))
+	}
+	rst.state.state = lstate
+	return rst
 }
